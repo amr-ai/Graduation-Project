@@ -125,7 +125,7 @@ def _executor(state: VizState) -> dict:
         except Exception as e:
             return {
                 "execution_result": {
-                    "fig": None, "output": "", "error": f"Failed to load data: {e}",
+                    "fig": None, "figures": [], "output": "", "error": f"Failed to load data: {e}",
                 },
                 "retry_count": retry_count + 1,
                 "last_error": str(e),
@@ -152,17 +152,30 @@ def _executor(state: VizState) -> dict:
 
     try:
         exec(code, g)
-        fig = g.get("fig")
         out = buffer.getvalue()
-        if fig is None:
+
+        # Collect primary fig + additional fig1..figN
+        figs = []
+        fig = g.get("fig")
+        if fig is not None:
+            figs.append(fig)
+        i = 1
+        while g.get(f"fig{i}") is not None:
+            figs.append(g[f"fig{i}"])
+            i += 1
+
+        if not figs:
             raise RuntimeError(
-                "No variable `fig` found after execution. Assign your chart to `fig`."
+                "No figures found after execution. Assign your chart to `fig` or `fig1`, `fig2`, etc."
             )
-        return {"execution_result": {"fig": fig, "output": out, "error": ""}}
+
+        return {
+            "execution_result": {"fig": figs[0], "figures": figs, "output": out, "error": ""},
+        }
     except Exception as e:
         tb = traceback.format_exc()
         return {
-            "execution_result": {"fig": None, "output": buffer.getvalue(), "error": tb},
+            "execution_result": {"fig": None, "figures": [], "output": buffer.getvalue(), "error": tb},
             "retry_count": retry_count + 1,
             "last_error": tb,
         }

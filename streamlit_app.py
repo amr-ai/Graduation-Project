@@ -28,7 +28,7 @@ from groq import Groq
 from core.state import GraphState
 from graphs.planner_graph import build_planner_graph
 from graphs.cleaning_graph import build_cleaning_graph
-from tools.db_tools import is_pg_configured, store_df_to_pg
+from tools.db_tools import get_schema_info, is_pg_configured, load_df_from_pg, store_df_to_pg
 from agents.visualization.viz_graph import build_viz_graph
 
 # ── Page config ────────────────────────────────────────────────────────
@@ -136,7 +136,7 @@ def _run_analysis(code: str, df: pd.DataFrame) -> dict:
 def _df_context(df: pd.DataFrame) -> str:
     """Short textual summary of a DataFrame for LLM context."""
     buf = io.StringIO()
-    buf.write(f"Shape: {df.shape[0]} rows × {df.shape[1]} columns\n")
+    buf.write(f"Shape: {df.shape[0]} rows x {df.shape[1]} columns\n")
     buf.write(f"Columns: {list(df.columns)}\n")
     buf.write(f"Dtypes:\n{df.dtypes.to_string()}\n")
     buf.write(f"\nFirst 5 rows:\n{df.head(5).to_string()}\n")
@@ -145,6 +145,104 @@ def _df_context(df: pd.DataFrame) -> str:
         if len(num_cols) > 0:
             buf.write(f"\nNumeric summary:\n{df[num_cols].describe().to_string()}\n")
     return buf.getvalue()
+
+
+def _generate_dashboard(data_df: pd.DataFrame | None, table_name: str) -> list[dict]:
+    """Auto-generate 5-7 diverse charts using the LLM, with retry on error."""
+    if data_df is not None:
+        schema = _df_context(data_df)
+        src_df = data_df
+    else:
+        schema = get_schema_info(table_name)
+        src_df = load_df_from_pg(table_name)
+
+    client = Groq(api_key=os.environ.get("GROQ_API_KEY") or api_key)
+    model = st.session_state.get("model", "llama-3.3-70b-versatile")
+
+    base_prompt = (
+        "You are a data visualization expert. Generate a comprehensive dashboard.\n\n"
+        f"Data schema:\n{schema}\n\n"
+        "Create 5 to 7 diverse charts that best explore and explain this data. "
+        "Use a variety of chart types (bar, line, pie, scatter, histogram, box, area). "
+        "Assign each chart to fig1, fig2, fig3, fig4, fig5, fig6, fig7. "
+        "Every figure MUST have a descriptive title set via the title parameter.\n\n"
+        "IMPORTANT:\n"
+        "- Do NOT use import statements. "
+        "pandas as pd, plotly.express as px, and plotly.graph_objects as go are already loaded.\n"
+        "- The data is in a DataFrame called `df`.\n"
+        "- Use EXACT column names as shown in the schema (case-sensitive, spaces matter).\n"
+        "- For px.pie(), use names= for the category column and values= for the numeric column.\n"
+        "- Wrap ALL code in a single ```python ... ``` block."
+    )
+
+    messages = [{"role": "system", "content": base_prompt}]
+
+    for attempt in range(3):
+        reply = client.chat.completions.create(
+            model=model,
+            messages=messages,
+            temperature=0.2,
+            max_tokens=4096,
+        )
+        raw = reply.choices[0].message.content.strip()
+
+        code_match = re.search(r"```python\n(.*?)```", raw, re.DOTALL)
+        code = code_match.group(1).strip() if code_match else raw
+
+        buffer = io.StringIO()
+
+        def _sandbox_print(*a, **kw):
+            kw["file"] = buffer
+            print(*a, **kw)
+
+        g = {
+            "pd": pd, "px": px, "go": go,
+            "df": src_df.copy(),
+            "__builtins__": {
+                **_SAFE_BUILTINS, "print": _sandbox_print, "__import__": __import__,
+            },
+        }
+
+        try:
+            exec(code, g)
+        except Exception:
+            tb = traceback.format_exc()
+            if attempt < 2:
+                messages.append({
+                    "role": "assistant",
+                    "content": raw,
+                })
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "The code above failed with this error:\n"
+                        f"```\n{tb}\n```\n"
+                        "Fix the issue and regenerate ALL charts. "
+                        "Ensure column names match exactly and all imports are omitted."
+                    ),
+                })
+                continue
+            else:
+                st.error(f"Dashboard generation failed after 3 attempts:\n```\n{tb}\n```")
+                return []
+
+        # Collect all fig1..figN + fallback fig
+        charts = []
+        i = 1
+        while g.get(f"fig{i}") is not None:
+            fig = g[f"fig{i}"]
+            title = fig.layout.title.text if fig.layout.title else f"Chart {i}"
+            charts.append({"query": title, "fig": fig, "code": code})
+            i += 1
+
+        if not charts and g.get("fig"):
+            fig = g["fig"]
+            title = fig.layout.title.text if fig.layout.title else "Chart"
+            charts.append({"query": title, "fig": fig, "code": code})
+
+        return charts
+
+    return []
 
 
 # ── Sidebar ────────────────────────────────────────────────────────────
@@ -164,7 +262,10 @@ with st.sidebar:
             "llama-3.3-70b-versatile",
             "llama-3.1-8b-instant",
             "mixtral-8x7b-32768",
-            "gemma2-9b-it",
+            "openai/gpt-oss-120b",
+            "openai/gpt-oss-20b",
+            "meta-llama/llama-4-scout-17b-16e-instruct",
+            "qwen/qwen3-32b",
         ],
         help="Groq model for planning and code generation",
     )
@@ -529,6 +630,20 @@ if _dash_has_data:
 
     # Show existing charts in a 2-column grid
     figures = st.session_state.get("viz_figures", [])
+
+    col_auto, col_clear = st.columns([3, 1])
+    with col_auto:
+        if st.button("Auto-Generate Dashboard", type="primary", use_container_width=True):
+            with st.spinner("Analyzing data and generating 5-7 charts …"):
+                new_charts = _generate_dashboard(data_df, table)
+                if new_charts:
+                    st.session_state.viz_figures = figures + new_charts
+                    st.rerun()
+    with col_clear:
+        if figures and st.button("Clear All Charts", use_container_width=True):
+            st.session_state.viz_figures = []
+            st.rerun()
+
     if figures:
         for i in range(0, len(figures), 2):
             cols = st.columns(2)
@@ -568,10 +683,23 @@ if _dash_has_data:
 
                 viz_state = graph.invoke(state)
                 exec_result = viz_state.get("execution_result", {})
-                if exec_result.get("fig"):
+                figures_list = exec_result.get("figures") or []
+                single_fig = exec_result.get("fig")
+
+                if figures_list:
+                    for fig in figures_list:
+                        title = fig.layout.title.text if fig.layout.title else viz_query
+                        figures.append({
+                            "query": title,
+                            "fig": fig,
+                            "code": viz_state.get("generated_code", ""),
+                        })
+                    st.session_state.viz_figures = figures
+                    st.rerun()
+                elif single_fig:
                     figures.append({
                         "query": viz_query,
-                        "fig": exec_result["fig"],
+                        "fig": single_fig,
                         "code": viz_state.get("generated_code", ""),
                     })
                     st.session_state.viz_figures = figures
@@ -582,10 +710,6 @@ if _dash_has_data:
                     )
             except Exception as e:
                 st.error(f"Error: {e}")
-
-    if figures and st.button("Clear All Charts"):
-        st.session_state.viz_figures = []
-        st.rerun()
 
 # ── Empty state ────────────────────────────────────────────────────────
 

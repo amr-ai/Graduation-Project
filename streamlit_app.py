@@ -1,13 +1,6 @@
 """
-Smart Analyst — Streamlit UI with human-in-the-loop and post-cleaning chat.
-
-Two-stage pipeline:
-  1. Planning (profiler → planner) — paused for human review + chat
-  2. Cleaning (coder → executor → validator) — runs with the approved plan
-  3. Post-cleaning chat — ask questions / give commands about the clean data
-
-Run with:
-    streamlit run streamlit_app.py
+Smart Analyst — Streamlit UI with human-in-the-loop, post-cleaning chat,
+and persistent visualization dashboard.
 """
 
 from __future__ import annotations
@@ -16,30 +9,28 @@ import contextlib
 import io
 import os
 import re
-import traceback
 
 from dotenv import load_dotenv
 import pandas as pd
-import plotly.express as px
-import plotly.graph_objects as go
 import streamlit as st
 from groq import Groq
 
 from core.state import GraphState
 from graphs.planner_graph import build_planner_graph
 from graphs.cleaning_graph import build_cleaning_graph
-from tools.db_tools import get_schema_info, is_pg_configured, load_df_from_pg, store_df_to_pg
+from tools.db_tools import is_pg_configured, store_df_to_pg
+from tools.sandbox import SAFE_BUILTINS, df_context, run_analysis
 from agents.visualization.viz_graph import build_viz_graph
+from agents.visualization.dashboard import generate_dashboard
 
 # ── Page config ────────────────────────────────────────────────────────
 
 load_dotenv()
-
 st.set_page_config(page_title="Smart Analyst", page_icon="", layout="wide")
 st.title("Smart Analyst")
 st.markdown("LLM-powered data cleaning pipeline with human review.")
 
-# ── Initialise session state ───────────────────────────────────────────
+# ── Session state defaults ─────────────────────────────────────────────
 
 _DEFAULTS = {
     "phase": "idle",
@@ -59,191 +50,6 @@ _DEFAULTS = {
 for key, val in _DEFAULTS.items():
     if key not in st.session_state:
         st.session_state[key] = val
-
-# ── Sandbox helpers (reused from executor) ─────────────────────────────
-
-_SAFE_BUILTINS: dict = {
-    "range": range,
-    "len": len,
-    "int": int,
-    "float": float,
-    "str": str,
-    "bool": bool,
-    "list": list,
-    "dict": dict,
-    "tuple": tuple,
-    "set": set,
-    "round": round,
-    "min": min,
-    "max": max,
-    "abs": abs,
-    "sum": sum,
-    "sorted": sorted,
-    "enumerate": enumerate,
-    "zip": zip,
-    "isinstance": isinstance,
-    "hasattr": hasattr,
-    "getattr": getattr,
-    "type": type,
-    "filter": filter,
-    "map": map,
-    "any": any,
-    "all": all,
-    "ValueError": ValueError,
-    "TypeError": TypeError,
-    "KeyError": KeyError,
-    "Exception": Exception,
-    "__import__": __import__,
-}
-
-
-def _strip_fences(code: str) -> str:
-    code = code.strip()
-    code = re.sub(r"^```(?:python)?\s*\n?", "", code)
-    code = re.sub(r"\n?```\s*$", "", code)
-    return code.strip()
-
-
-def _run_analysis(code: str, df: pd.DataFrame) -> dict:
-    """Execute LLM-generated code on a DataFrame copy. Returns {output, error, df, fig}."""
-    code = _strip_fences(code)
-    buffer = io.StringIO()
-
-    def _sandbox_print(*a, **kw):
-        kw["file"] = buffer
-        print(*a, **kw)
-
-    g = {
-        "pd": pd,
-        "px": px,
-        "go": go,
-        "df": df.copy(),
-        "__builtins__": {**_SAFE_BUILTINS, "print": _sandbox_print},
-    }
-    try:
-        exec(code, g)
-        out = buffer.getvalue()
-        new_df = g.get("df", df)
-        fig = g.get("fig")
-        result = {"output": out, "error": None, "df": new_df}
-        if fig is not None:
-            result["fig"] = fig
-        return result
-    except Exception:
-        return {"output": buffer.getvalue(), "error": traceback.format_exc(), "df": df}
-
-
-def _df_context(df: pd.DataFrame) -> str:
-    """Short textual summary of a DataFrame for LLM context."""
-    buf = io.StringIO()
-    buf.write(f"Shape: {df.shape[0]} rows x {df.shape[1]} columns\n")
-    buf.write(f"Columns: {list(df.columns)}\n")
-    buf.write(f"Dtypes:\n{df.dtypes.to_string()}\n")
-    buf.write(f"\nFirst 5 rows:\n{df.head(5).to_string()}\n")
-    if len(df) > 0:
-        num_cols = df.select_dtypes(include="number").columns
-        if len(num_cols) > 0:
-            buf.write(f"\nNumeric summary:\n{df[num_cols].describe().to_string()}\n")
-    return buf.getvalue()
-
-
-def _generate_dashboard(data_df: pd.DataFrame | None, table_name: str) -> list[dict]:
-    """Auto-generate 5-7 diverse charts using the LLM, with retry on error."""
-    if data_df is not None:
-        schema = _df_context(data_df)
-        src_df = data_df
-    else:
-        schema = get_schema_info(table_name)
-        src_df = load_df_from_pg(table_name)
-
-    client = Groq(api_key=os.environ.get("GROQ_API_KEY") or api_key)
-    model = st.session_state.get("model", "llama-3.3-70b-versatile")
-
-    base_prompt = (
-        "You are a data visualization expert. Generate a comprehensive dashboard.\n\n"
-        f"Data schema:\n{schema}\n\n"
-        "Create 5 to 7 diverse charts that best explore and explain this data. "
-        "Use a variety of chart types (bar, line, pie, scatter, histogram, box, area). "
-        "Assign each chart to fig1, fig2, fig3, fig4, fig5, fig6, fig7. "
-        "Every figure MUST have a descriptive title set via the title parameter.\n\n"
-        "IMPORTANT:\n"
-        "- Do NOT use import statements. "
-        "pandas as pd, plotly.express as px, and plotly.graph_objects as go are already loaded.\n"
-        "- The data is in a DataFrame called `df`.\n"
-        "- Use EXACT column names as shown in the schema (case-sensitive, spaces matter).\n"
-        "- For px.pie(), use names= for the category column and values= for the numeric column.\n"
-        "- Wrap ALL code in a single ```python ... ``` block."
-    )
-
-    messages = [{"role": "system", "content": base_prompt}]
-
-    for attempt in range(3):
-        reply = client.chat.completions.create(
-            model=model,
-            messages=messages,
-            temperature=0.2,
-            max_tokens=4096,
-        )
-        raw = reply.choices[0].message.content.strip()
-
-        code_match = re.search(r"```python\n(.*?)```", raw, re.DOTALL)
-        code = code_match.group(1).strip() if code_match else raw
-
-        buffer = io.StringIO()
-
-        def _sandbox_print(*a, **kw):
-            kw["file"] = buffer
-            print(*a, **kw)
-
-        g = {
-            "pd": pd, "px": px, "go": go,
-            "df": src_df.copy(),
-            "__builtins__": {
-                **_SAFE_BUILTINS, "print": _sandbox_print, "__import__": __import__,
-            },
-        }
-
-        try:
-            exec(code, g)
-        except Exception:
-            tb = traceback.format_exc()
-            if attempt < 2:
-                messages.append({
-                    "role": "assistant",
-                    "content": raw,
-                })
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        "The code above failed with this error:\n"
-                        f"```\n{tb}\n```\n"
-                        "Fix the issue and regenerate ALL charts. "
-                        "Ensure column names match exactly and all imports are omitted."
-                    ),
-                })
-                continue
-            else:
-                st.error(f"Dashboard generation failed after 3 attempts:\n```\n{tb}\n```")
-                return []
-
-        # Collect all fig1..figN + fallback fig
-        charts = []
-        i = 1
-        while g.get(f"fig{i}") is not None:
-            fig = g[f"fig{i}"]
-            title = fig.layout.title.text if fig.layout.title else f"Chart {i}"
-            charts.append({"query": title, "fig": fig, "code": code})
-            i += 1
-
-        if not charts and g.get("fig"):
-            fig = g["fig"]
-            title = fig.layout.title.text if fig.layout.title else "Chart"
-            charts.append({"query": title, "fig": fig, "code": code})
-
-        return charts
-
-    return []
-
 
 # ── Sidebar ────────────────────────────────────────────────────────────
 
@@ -304,14 +110,14 @@ def _base_state(raw_df, fname, mdl) -> GraphState:
 
 
 def _render_chat(container, messages_key, prompt_placeholder, system_prompt_fn, df=None):
-    """Reusable chat widget. Renders messages, handles input, calls LLM (+ optionally executes code)."""
+    """Reusable chat widget — renders messages, handles input, calls LLM + executes code."""
     messages = st.session_state[messages_key]
 
     for msg in messages:
         with container.chat_message(msg["role"]):
             st.markdown(msg["content"])
             if "fig" in msg:
-                st.plotly_chart(msg["fig"], use_container_width=True)
+                st.plotly_chart(msg["fig"], use_container_width=True, config={"displaylogo": False, "modeBarButtonsToRemove": ["sendDataToCloud"]})
             if "df" in msg:
                 st.dataframe(msg["df"])
             if "code" in msg:
@@ -328,8 +134,6 @@ def _render_chat(container, messages_key, prompt_placeholder, system_prompt_fn, 
                 try:
                     client = Groq(api_key=os.environ.get("GROQ_API_KEY") or api_key)
                     sys_prompt = system_prompt_fn()
-
-                    # Ask LLM to respond with Python code when appropriate
                     analysis_context = ""
                     if df is not None:
                         analysis_context = (
@@ -338,13 +142,18 @@ def _render_chat(container, messages_key, prompt_placeholder, system_prompt_fn, 
                             "WRITE Python code using `df` and the code will be executed automatically. "
                             "Wrap code in ```python ... ``` fences. "
                             "Use print() to show text results, or assign back to `df` to keep changes. "
-                            f"\n\nDataFrame context:\n{_df_context(df)}"
+                            f"\n\nDataFrame context:\n{df_context(df)}"
                         )
 
                     reply = client.chat.completions.create(
                         model=st.session_state.get("model", "llama-3.3-70b-versatile"),
                         messages=[
-                            {"role": "system", "content": sys_prompt + "\n\n" + analysis_context if analysis_context else sys_prompt},
+                            {
+                                "role": "system",
+                                "content": sys_prompt + "\n\n" + analysis_context
+                                if analysis_context
+                                else sys_prompt,
+                            },
                             *[{"role": m["role"], "content": m["content"]} for m in messages[-6:]],
                         ],
                         temperature=0.2,
@@ -354,11 +163,10 @@ def _render_chat(container, messages_key, prompt_placeholder, system_prompt_fn, 
                 except Exception as exc:
                     answer = f"Error: {exc}"
 
-            # Check if response contains executable code
             code_blocks = re.findall(r"```python\n(.*?)```", answer, re.DOTALL)
             if code_blocks and df is not None:
                 for code in code_blocks:
-                    result = _run_analysis(code, df)
+                    result = run_analysis(code, df)
                     if result["error"]:
                         answer += f"\n\n**Execution error:**\n```\n{result['error']}\n```"
                     else:
@@ -375,7 +183,7 @@ def _render_chat(container, messages_key, prompt_placeholder, system_prompt_fn, 
 
                             st.markdown(answer)
                             if has_fig:
-                                st.plotly_chart(result["fig"], use_container_width=True)
+                                st.plotly_chart(result["fig"], use_container_width=True, config={"displaylogo": False, "modeBarButtonsToRemove": ["sendDataToCloud"]})
                             if has_new_df:
                                 st.dataframe(result["df"])
 
@@ -396,7 +204,7 @@ def _render_chat(container, messages_key, prompt_placeholder, system_prompt_fn, 
             messages.append(msg_entry)
 
 
-# ── Trigger planning ───────────────────────────────────────────────────
+# ── Phase: idle — trigger planning ─────────────────────────────────────
 
 if st.session_state.phase == "idle" and uploaded_file is not None:
     raw_df = pd.read_csv(uploaded_file)
@@ -417,7 +225,7 @@ if st.session_state.phase == "idle" and uploaded_file is not None:
         st.session_state.model = model
         st.rerun()
 
-# ── Stage 1: Planning ─────────────────────────────────────────────────
+# ── Phase: planning ────────────────────────────────────────────────────
 
 if st.session_state.phase == "planning":
     with st.spinner("Profiling and planning …"):
@@ -439,7 +247,7 @@ if st.session_state.phase == "planning":
     st.session_state.phase = "review"
     st.rerun()
 
-# ── Stage 2: Review ────────────────────────────────────────────────────
+# ── Phase: review ──────────────────────────────────────────────────────
 
 if st.session_state.phase == "review":
     col_plan, col_chat = st.columns([3, 2])
@@ -486,7 +294,7 @@ if st.session_state.phase == "review":
             system_prompt_fn=_review_sys_prompt,
         )
 
-# ── Stage 3: Cleaning ──────────────────────────────────────────────────
+# ── Phase: cleaning ────────────────────────────────────────────────────
 
 if st.session_state.phase == "cleaning":
     with st.spinner("Generating code and cleaning data …"):
@@ -508,13 +316,12 @@ if st.session_state.phase == "cleaning":
     if clean_df is not None:
         st.session_state.clean_df = clean_df.copy()
 
-    # Store to PostgreSQL if configured
     if is_pg_configured() and clean_df is not None:
         try:
             raw_table = (
                 st.session_state.file_name.replace(".csv", "").replace(".", "_")
             )
-            table_name = f"clean_{raw_table}"
+            table_name = f"clean_{raw_table}".lower()
             store_df_to_pg(clean_df, table_name)
             st.session_state.pg_table = table_name
             st.session_state.pg_stored = True
@@ -525,7 +332,7 @@ if st.session_state.phase == "cleaning":
     st.session_state.phase = "done"
     st.rerun()
 
-# ── Results + Post-cleaning Chat ──────────────────────────────────────
+# ── Phase: done — results + post-cleaning chat ─────────────────────────
 
 if st.session_state.phase == "done" and st.session_state.final_state is not None:
     result = st.session_state.final_state
@@ -533,7 +340,6 @@ if st.session_state.phase == "done" and st.session_state.final_state is not None
 
     tab_results, tab_chat = st.tabs(["Results", "Chat"])
 
-    # ── Results tab ──────────────────────────────────────────────────
     with tab_results:
         passed = report.get("passed", False)
         c1, c2, c3 = st.columns(3)
@@ -577,7 +383,6 @@ if st.session_state.phase == "done" and st.session_state.final_state is not None
                 st.session_state[key] = _DEFAULTS[key]
             st.rerun()
 
-    # ── Chat tab ─────────────────────────────────────────────────────
     with tab_chat:
         st.subheader("Ask About Your Data")
         st.caption("Ask questions, request analysis, or transform the cleaned data.")
@@ -608,7 +413,6 @@ if st.session_state.phase == "done" and st.session_state.final_state is not None
         )
 
 # ── Persistent visualization dashboard ─────────────────────────────────
-# Always visible whenever data is available (clean_df or PG).
 
 _dash_has_data = (
     st.session_state.clean_df is not None
@@ -620,22 +424,21 @@ if _dash_has_data:
     st.subheader("Visualization Dashboard")
 
     use_pg = st.session_state.pg_stored and st.session_state.pg_table
-    table = st.session_state.pg_table if use_pg else ""
+    table = st.session_state.pg_table.lower() if use_pg else ""
     data_df = None if use_pg else st.session_state.clean_df
 
     if use_pg:
         st.caption(f"Reading from PostgreSQL table **{table}**.")
     else:
-        st.caption("Using in-memory cleaned data. Run pipeline with PG configured to persist.")
+        st.caption("Using in-memory cleaned data.")
 
-    # Show existing charts in a 2-column grid
     figures = st.session_state.get("viz_figures", [])
 
     col_auto, col_clear = st.columns([3, 1])
     with col_auto:
         if st.button("Auto-Generate Dashboard", type="primary", use_container_width=True):
             with st.spinner("Analyzing data and generating 5-7 charts …"):
-                new_charts = _generate_dashboard(data_df, table)
+                new_charts = generate_dashboard(data_df, table)
                 if new_charts:
                     st.session_state.viz_figures = figures + new_charts
                     st.rerun()
@@ -653,21 +456,17 @@ if _dash_has_data:
                     entry = figures[idx]
                     with cols[j]:
                         st.caption(f"_{entry['query']}_")
-                        st.plotly_chart(entry["fig"], use_container_width=True)
+                        st.plotly_chart(entry["fig"], use_container_width=True, config={"displaylogo": False, "modeBarButtonsToRemove": ["sendDataToCloud"]})
                         with st.expander("Code", expanded=False):
                             st.code(entry["code"], language="python")
 
-    viz_query = st.chat_input(
-        "Ask for a chart (e.g. 'bar chart of sales by category')"
-    )
+    viz_query = st.chat_input("Ask for a chart (e.g. 'bar chart of sales by category')")
 
     if viz_query:
         figures = st.session_state.setdefault("viz_figures", [])
         with st.spinner("Generating chart …"):
             try:
                 graph = build_viz_graph()
-
-                # Build the state dict — pass df directly for in-memory mode
                 state = {
                     "user_query": viz_query,
                     "schema_info": "",

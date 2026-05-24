@@ -47,7 +47,7 @@ def coder_node(state: GraphState) -> dict:
     retry_count = state.get("retry_count", 0)
 
     if retry_count == 0:
-        print("\n── Coder: generating cleaning code …")
+        print("\n-- Coder: generating cleaning code ...")
         system_prompt = _load_prompt("coder_prompt.txt")
 
         profile = DatasetProfile(**state["metadata"])
@@ -58,7 +58,7 @@ def coder_node(state: GraphState) -> dict:
             f"{profile.model_dump_json(indent=2)}"
         )
     else:
-        print(f"\n── Coder: repairing code (attempt {retry_count + 1}) …")
+        print(f"\n-- Coder: repairing code (attempt {retry_count + 1}) ...")
         system_prompt = _load_prompt("repair_prompt.txt")
 
         user_message = (
@@ -72,8 +72,10 @@ def coder_node(state: GraphState) -> dict:
 
     client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
+    model = state.get("model_name", "llama-3.3-70b-versatile")
+
     response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model=model,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message},
@@ -85,6 +87,6 @@ def coder_node(state: GraphState) -> dict:
     raw_code = response.choices[0].message.content.strip()
     code = _strip_markdown_fences(raw_code)
 
-    print(f"   → Generated {code.count(chr(10)) + 1} lines of code")
+    print(f"   -> Generated {code.count(chr(10)) + 1} lines of code")
 
     return {"generated_code": code}

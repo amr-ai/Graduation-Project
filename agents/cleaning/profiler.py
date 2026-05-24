@@ -9,17 +9,15 @@ downstream LLM node uses to understand the data.
 from __future__ import annotations
 
 from core.state import GraphState
-from tools.profiler_tools import build_dataset_profile
+from tools.profiler_tools import build_dataset_profile, replace_placeholders_with_nan
 
 
 def profiler_node(state: GraphState) -> dict:
     """
-    Analyse the raw DataFrame and produce a validated DatasetProfile.
-
-    Returns:
-        dict with 'metadata' key containing DatasetProfile.model_dump().
+    Standardise placeholders to NaN, profile the DataFrame, and return
+    the cleaned raw_df + metadata.
     """
-    raw_df = state["raw_df"]
+    raw_df = replace_placeholders_with_nan(state["raw_df"])
 
     print("-- Profiler: analysing dataset ...")
     profile = build_dataset_profile(raw_df)
@@ -27,14 +25,19 @@ def profiler_node(state: GraphState) -> dict:
           f"{profile.duplicate_rows_count} duplicates detected")
 
     for col in profile.columns:
-        flags = []
+        flags = [f"inferred: {col.inferred_type}"]
         if col.missing_count > 0:
-            flags.append(f"{col.missing_count} missing ({col.missing_pct}%)")
+            label = "missing"
+            if col.placeholder_count:
+                label += f" ({col.placeholder_count} placeholders)"
+            flags.append(f"{col.missing_count} {label} ({col.missing_pct}%)")
         if col.type_mismatch_flag:
             flags.append("type mismatch")
         if col.outlier_flag:
             flags.append("outliers")
-        if flags:
-            print(f"   [!] {col.name}: {', '.join(flags)}")
+        print(f"   {col.name}: {', '.join(flags)}")
 
-    return {"metadata": profile.model_dump()}
+    for rel in profile.relationships:
+        print(f"   [~] {rel['expression']}  ({rel['match_pct']}% match)")
+
+    return {"raw_df": raw_df, "metadata": profile.model_dump()}

@@ -10,8 +10,12 @@ from __future__ import annotations
 
 import pandas as pd
 import numpy as np
+from itertools import combinations
 
 from models.profiler_models import ColumnProfile, DatasetProfile
+
+# Values commonly used as placeholders for missing data
+PLACEHOLDER_VALUES: set[str] = {"", "unknown", "error", "n/a", "tbd", "-", "?"}
 
 
 # ── Per-column helpers ─────────────────────────────────────────────────
@@ -30,15 +34,13 @@ def detect_type_mismatch(series: pd.Series) -> bool:
     if series.dropna().empty:
         return False
 
-    if series.dtype == "object":
+    if pd.api.types.is_string_dtype(series):
         non_null = series.dropna()
         numeric_count = pd.to_numeric(non_null, errors="coerce").notna().sum()
         ratio = numeric_count / len(non_null) if len(non_null) > 0 else 0
-        # If most values look numeric but dtype is object → mismatch
+        # If most values look numeric but dtype is string → mismatch
         if 0.3 < ratio < 1.0:
             return True
-        # Check for date-like strings in an object column
-        # (heuristic: if a column has "date" in its name and is object)
         return False
 
     return False
@@ -99,29 +101,164 @@ def compute_numeric_stats(series: pd.Series) -> dict | None:
     }
 
 
+def infer_column_type(series: pd.Series, col_name: str) -> str:
+    """
+    Infer the semantic type of a column based on its name, dtype, and values.
+
+    Returns one of: numeric, categorical, text, date, id, boolean, unknown.
+    """
+    name_lower = col_name.lower().strip()
+
+    # Heuristic: name suggests date/time (check before id to catch e.g. "order_date")
+    if any(kw in name_lower for kw in ("date", "time", "year", "month", "day")):
+        return "date"
+
+    # Heuristic: name-based ID detection + high uniqueness
+    if any(kw in name_lower for kw in ("id", "code", "key", "ord", "sku", "ref")):
+        nunique = series.dropna().nunique()
+        total = max(len(series.dropna()), 1)
+        if nunique / total > 0.5:
+            return "id"
+
+    if pd.api.types.is_bool_dtype(series.dtype):
+        return "boolean"
+
+    if pd.api.types.is_numeric_dtype(series.dtype):
+        return "numeric"
+
+    non_null = series.dropna()
+    if non_null.empty:
+        return "unknown"
+
+    # Check if mostly numeric strings → numeric (before categorical, since
+    # e.g. "quantity" with values 1-10 stored as strings is numeric, not categorical)
+    if pd.api.types.is_string_dtype(series):
+        numeric_count = pd.to_numeric(non_null, errors="coerce").notna().sum()
+        if numeric_count / len(non_null) > 0.8 and non_null.nunique() > 2:
+            return "numeric"
+
+    # Low cardinality → categorical
+    card_ratio = non_null.nunique() / len(non_null)
+    if card_ratio < 0.05 or non_null.nunique() < 25:
+        return "categorical"
+
+    return "text"
+
+
+def detect_column_relationships(df: pd.DataFrame) -> list[dict]:
+    """
+    Detect meaningful relationships between columns.
+
+    Currently detects:
+      - Arithmetic relationships (a * b = c, a + b = c)
+    """
+    relationships: list[dict] = []
+
+    # Collect columns that are or can be treated as numeric
+    numeric_cols = []
+    for col in df.columns:
+        if pd.api.types.is_numeric_dtype(df[col]):
+            numeric_cols.append(col)
+        elif pd.api.types.is_string_dtype(df[col]):
+            numeric_count = pd.to_numeric(df[col], errors="coerce").notna().sum()
+            if numeric_count / max(len(df[col].dropna()), 1) > 0.5:
+                numeric_cols.append(col)
+
+    if len(numeric_cols) < 3:
+        return relationships
+
+    # Check arithmetic: col_a * col_b ≈ col_c
+    for col_a, col_b in combinations(numeric_cols, 2):
+        a = pd.to_numeric(df[col_a], errors="coerce")
+        b = pd.to_numeric(df[col_b], errors="coerce")
+        for col_c in numeric_cols:
+            if col_c in (col_a, col_b):
+                continue
+            c = pd.to_numeric(df[col_c], errors="coerce")
+            mask = a.notna() & b.notna() & c.notna()
+            if mask.sum() < 5:
+                continue
+            prod = a[mask] * b[mask]
+            match = (prod / c[mask] - 1).abs() < 0.01
+            if match.mean() > 0.9:
+                relationships.append({
+                    "type": "arithmetic",
+                    "expression": f"{col_c} = {col_a} × {col_b}",
+                    "match_pct": round(match.mean() * 100, 1),
+                })
+                break
+
+        if any(r["expression"] == f"{col_c} = {col_a} × {col_b}"
+               for r in relationships for col_c in numeric_cols):
+            continue
+
+    # Check additive: col_a + col_b ≈ col_c
+    for col_a, col_b in combinations(numeric_cols, 2):
+        a = pd.to_numeric(df[col_a], errors="coerce")
+        b = pd.to_numeric(df[col_b], errors="coerce")
+        for col_c in numeric_cols:
+            if col_c in (col_a, col_b):
+                continue
+            c = pd.to_numeric(df[col_c], errors="coerce")
+            mask = a.notna() & b.notna() & c.notna()
+            if mask.sum() < 5:
+                continue
+            total = a[mask] + b[mask]
+            match = (total / c[mask] - 1).abs() < 0.01
+            if match.mean() > 0.9:
+                relationships.append({
+                    "type": "arithmetic",
+                    "expression": f"{col_c} = {col_a} + {col_b}",
+                    "match_pct": round(match.mean() * 100, 1),
+                })
+                break
+
+    return relationships
+
+
 # ── Builders ───────────────────────────────────────────────────────────
+
+
+def _count_placeholders(series: pd.Series) -> int:
+    """Count values that are known placeholder strings for missing data."""
+    if not pd.api.types.is_string_dtype(series):
+        return 0
+    return int(series.dropna().str.strip().str.lower().isin(PLACEHOLDER_VALUES).sum())
 
 
 def build_column_profile(series: pd.Series) -> ColumnProfile:
     """Build a ColumnProfile for a single DataFrame column."""
     total = len(series)
-    missing = int(series.isna().sum())
-    non_null = series.dropna()
+    missing_nulls = int(series.isna().sum())
+    placeholder_count = _count_placeholders(series)
+    missing = missing_nulls + placeholder_count
+
+    # Filter out placeholders for profiling (treat as missing)
+    if pd.api.types.is_string_dtype(series):
+        clean_series = series.dropna()
+        clean_mask = ~clean_series.str.strip().str.lower().isin(PLACEHOLDER_VALUES)
+        clean_vals = clean_series[clean_mask]
+    else:
+        clean_vals = series.dropna()
 
     # Sample up to 5 unique values, converted to native Python types
     sample_vals = (
-        non_null.drop_duplicates()
+        clean_vals.drop_duplicates()
         .head(5)
         .apply(lambda x: x.item() if hasattr(x, "item") else x)
         .tolist()
     )
 
+    inferred = infer_column_type(series, series.name)
+
     return ColumnProfile(
         name=series.name,
         dtype=str(series.dtype),
+        inferred_type=inferred,
         missing_count=missing,
         missing_pct=round((missing / total) * 100, 2) if total > 0 else 0.0,
-        unique_count=int(non_null.nunique()),
+        placeholder_count=placeholder_count,
+        unique_count=int(clean_vals.nunique()),
         sample_values=sample_vals,
         type_mismatch_flag=detect_type_mismatch(series),
         outlier_flag=detect_outliers(series),
@@ -129,13 +266,33 @@ def build_column_profile(series: pd.Series) -> ColumnProfile:
     )
 
 
+def replace_placeholders_with_nan(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Convert known placeholder strings (UNKNOWN, ERROR, N/A, etc.) to NaN
+    in all string-typed columns, and widen integer columns to float64 so
+    they can safely hold NaN and float results from imputation/capping.
+
+    Returns a new DataFrame — the original is not modified.
+    """
+    df = df.copy()
+    for col in df.columns:
+        if pd.api.types.is_string_dtype(df[col]):
+            mask = df[col].str.strip().str.lower().isin(PLACEHOLDER_VALUES)
+            df.loc[mask, col] = pd.NA
+        elif pd.api.types.is_integer_dtype(df[col]):
+            df[col] = df[col].astype("float64")
+    return df
+
+
 def build_dataset_profile(df: pd.DataFrame) -> DatasetProfile:
     """Build a full DatasetProfile from a DataFrame."""
     column_profiles = [build_column_profile(df[col]) for col in df.columns]
+    relationships = detect_column_relationships(df)
 
     return DatasetProfile(
         total_rows=len(df),
         total_cols=len(df.columns),
         duplicate_rows_count=int(df.duplicated().sum()),
         columns=column_profiles,
+        relationships=relationships,
     )

@@ -16,6 +16,7 @@ class GraphState(TypedDict):
     # ── Input ──────────────────────────────────────────────────────────
     raw_df: pd.DataFrame                # Original DataFrame loaded from CSV
     file_path: str                      # Path to the source CSV file
+    model_name: str                     # Groq model to use for LLM nodes
 
     # ── Profiler output ────────────────────────────────────────────────
     metadata: dict                      # DatasetProfile.model_dump() output

@@ -33,7 +33,7 @@ def planner_node(state: GraphState) -> dict:
     Returns:
         dict with 'cleaning_plan' key containing the numbered plan text.
     """
-    print("\n── Planner: generating cleaning plan …")
+    print("\n-- Planner: generating cleaning plan ...")
 
     system_prompt = _load_prompt("planner_prompt.txt")
 
@@ -46,8 +46,10 @@ def planner_node(state: GraphState) -> dict:
 
     client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
 
+    model = state.get("model_name", "llama-3.3-70b-versatile")
+
     response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
+        model=model,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_message},
@@ -57,6 +59,6 @@ def planner_node(state: GraphState) -> dict:
     )
 
     plan = response.choices[0].message.content.strip()
-    print(f"   → Plan generated ({plan.count(chr(10)) + 1} lines)")
+    print(f"   -> Plan generated ({plan.count(chr(10)) + 1} lines)")
 
     return {"cleaning_plan": plan}

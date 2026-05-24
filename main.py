@@ -48,6 +48,7 @@ def main() -> None:
     initial_state: GraphState = {
         "raw_df": raw_df,
         "file_path": str(data_path),
+        "model_name": "llama-3.3-70b-versatile",
         "metadata": {},
         "cleaning_plan": "",
         "generated_code": "",

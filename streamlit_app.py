@@ -18,15 +18,22 @@ import os
 import re
 import traceback
 
+from dotenv import load_dotenv
 import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
 import streamlit as st
 from groq import Groq
 
 from core.state import GraphState
 from graphs.planner_graph import build_planner_graph
 from graphs.cleaning_graph import build_cleaning_graph
+from tools.db_tools import is_pg_configured, store_df_to_pg
+from agents.visualization.viz_graph import build_viz_graph
 
 # ── Page config ────────────────────────────────────────────────────────
+
+load_dotenv()
 
 st.set_page_config(page_title="Smart Analyst", page_icon="", layout="wide")
 st.title("Smart Analyst")
@@ -43,6 +50,10 @@ _DEFAULTS = {
     "chat_messages": [],
     "post_chat_messages": [],
     "clean_df": None,
+    "viz_figures": [],
+    "pg_stored": False,
+    "pg_table": "",
+    "pg_error": "",
 }
 
 for key, val in _DEFAULTS.items():
@@ -82,6 +93,7 @@ _SAFE_BUILTINS: dict = {
     "TypeError": TypeError,
     "KeyError": KeyError,
     "Exception": Exception,
+    "__import__": __import__,
 }
 
 
@@ -93,7 +105,7 @@ def _strip_fences(code: str) -> str:
 
 
 def _run_analysis(code: str, df: pd.DataFrame) -> dict:
-    """Execute LLM-generated code on a DataFrame copy. Returns {output, error, df}."""
+    """Execute LLM-generated code on a DataFrame copy. Returns {output, error, df, fig}."""
     code = _strip_fences(code)
     buffer = io.StringIO()
 
@@ -103,6 +115,8 @@ def _run_analysis(code: str, df: pd.DataFrame) -> dict:
 
     g = {
         "pd": pd,
+        "px": px,
+        "go": go,
         "df": df.copy(),
         "__builtins__": {**_SAFE_BUILTINS, "print": _sandbox_print},
     }
@@ -110,7 +124,11 @@ def _run_analysis(code: str, df: pd.DataFrame) -> dict:
         exec(code, g)
         out = buffer.getvalue()
         new_df = g.get("df", df)
-        return {"output": out, "error": None, "df": new_df}
+        fig = g.get("fig")
+        result = {"output": out, "error": None, "df": new_df}
+        if fig is not None:
+            result["fig"] = fig
+        return result
     except Exception:
         return {"output": buffer.getvalue(), "error": traceback.format_exc(), "df": df}
 
@@ -191,6 +209,8 @@ def _render_chat(container, messages_key, prompt_placeholder, system_prompt_fn, 
     for msg in messages:
         with container.chat_message(msg["role"]):
             st.markdown(msg["content"])
+            if "fig" in msg:
+                st.plotly_chart(msg["fig"], use_container_width=True)
             if "df" in msg:
                 st.dataframe(msg["df"])
             if "code" in msg:
@@ -243,17 +263,29 @@ def _render_chat(container, messages_key, prompt_placeholder, system_prompt_fn, 
                     else:
                         if result["output"]:
                             answer += f"\n\n**Output:**\n```\n{result['output']}\n```"
-                        if result["df"] is not None and not result["df"].equals(df):
-                            st.session_state.clean_df = result["df"]
-                            df = result["df"]
+
+                        has_fig = "fig" in result and result["fig"] is not None
+                        has_new_df = result["df"] is not None and not result["df"].equals(df)
+
+                        if has_fig or has_new_df:
+                            if has_new_df:
+                                st.session_state.clean_df = result["df"]
+                                df = result["df"]
+
                             st.markdown(answer)
-                            st.dataframe(result["df"])
-                            messages.append({
-                                "role": "assistant",
-                                "content": answer,
-                                "df": result["df"],
-                                "code": code,
-                            })
+                            if has_fig:
+                                st.plotly_chart(result["fig"], use_container_width=True)
+                            if has_new_df:
+                                st.dataframe(result["df"])
+
+                            msg_entry = {"role": "assistant", "content": answer}
+                            if has_fig:
+                                msg_entry["fig"] = result["fig"]
+                            if has_new_df:
+                                msg_entry["df"] = result["df"]
+                            if code_blocks:
+                                msg_entry["code"] = code_blocks[0]
+                            messages.append(msg_entry)
                             return
 
             st.markdown(answer)
@@ -374,18 +406,34 @@ if st.session_state.phase == "cleaning":
     clean_df = result.get("execution_result", {}).get("clean_df")
     if clean_df is not None:
         st.session_state.clean_df = clean_df.copy()
+
+    # Store to PostgreSQL if configured
+    if is_pg_configured() and clean_df is not None:
+        try:
+            raw_table = (
+                st.session_state.file_name.replace(".csv", "").replace(".", "_")
+            )
+            table_name = f"clean_{raw_table}"
+            store_df_to_pg(clean_df, table_name)
+            st.session_state.pg_table = table_name
+            st.session_state.pg_stored = True
+        except Exception as e:
+            st.session_state.pg_stored = False
+            st.session_state.pg_error = str(e)
+
     st.session_state.phase = "done"
     st.rerun()
 
-# ── Results + Post-cleaning Chat ───────────────────────────────────────
+# ── Results + Post-cleaning Chat ──────────────────────────────────────
 
 if st.session_state.phase == "done" and st.session_state.final_state is not None:
     result = st.session_state.final_state
     report = result.get("validation_report", {})
 
-    col_results, col_chat = st.columns([3, 2])
+    tab_results, tab_chat = st.tabs(["Results", "Chat"])
 
-    with col_results:
+    # ── Results tab ──────────────────────────────────────────────────
+    with tab_results:
         passed = report.get("passed", False)
         c1, c2, c3 = st.columns(3)
         c1.metric("Validation", "PASSED" if passed else "FAILED")
@@ -428,7 +476,8 @@ if st.session_state.phase == "done" and st.session_state.final_state is not None
                 st.session_state[key] = _DEFAULTS[key]
             st.rerun()
 
-    with col_chat:
+    # ── Chat tab ─────────────────────────────────────────────────────
+    with tab_chat:
         st.subheader("Ask About Your Data")
         st.caption("Ask questions, request analysis, or transform the cleaned data.")
 
@@ -438,16 +487,105 @@ if st.session_state.phase == "done" and st.session_state.final_state is not None
                 "Help them explore, analyze, and transform their data. "
                 "When you need to perform analysis, write Python code using the `df` variable. "
                 "The code will be executed and results shown to the user. "
-                "Use print() for text output, or modify `df` in place to keep changes."
+                "Use print() for text output, or modify `df` in place to keep changes.\n\n"
+                "For visualizations, use plotly.express (imported as `px`) or plotly.graph_objects "
+                "(imported as `go`). Create a figure variable named `fig` so it renders automatically.\n"
+                "Examples:\n"
+                "- fig = px.bar(df, x='category', y='total_spent', title='Sales by Category')\n"
+                "- fig = px.line(df, x='order_date', y='total_spent', title='Trend')\n"
+                "- fig = px.scatter(df, x='quantity', y='total_spent', color='category')\n"
+                "- fig = px.pie(df, names='product', values='total_spent')\n"
+                "- fig = px.histogram(df, x='total_spent', nbins=20)"
             )
 
         _render_chat(
-            container=col_chat,
+            container=tab_chat,
             messages_key="post_chat_messages",
             prompt_placeholder="Ask about your data …",
             system_prompt_fn=_post_sys_prompt,
             df=st.session_state.clean_df,
         )
+
+# ── Persistent visualization dashboard ─────────────────────────────────
+# Always visible whenever data is available (clean_df or PG).
+
+_dash_has_data = (
+    st.session_state.clean_df is not None
+    or (st.session_state.pg_stored and st.session_state.pg_table)
+)
+
+if _dash_has_data:
+    st.divider()
+    st.subheader("Visualization Dashboard")
+
+    use_pg = st.session_state.pg_stored and st.session_state.pg_table
+    table = st.session_state.pg_table if use_pg else ""
+    data_df = None if use_pg else st.session_state.clean_df
+
+    if use_pg:
+        st.caption(f"Reading from PostgreSQL table **{table}**.")
+    else:
+        st.caption("Using in-memory cleaned data. Run pipeline with PG configured to persist.")
+
+    # Show existing charts in a 2-column grid
+    figures = st.session_state.get("viz_figures", [])
+    if figures:
+        for i in range(0, len(figures), 2):
+            cols = st.columns(2)
+            for j in range(2):
+                idx = i + j
+                if idx < len(figures):
+                    entry = figures[idx]
+                    with cols[j]:
+                        st.caption(f"_{entry['query']}_")
+                        st.plotly_chart(entry["fig"], use_container_width=True)
+                        with st.expander("Code", expanded=False):
+                            st.code(entry["code"], language="python")
+
+    viz_query = st.chat_input(
+        "Ask for a chart (e.g. 'bar chart of sales by category')"
+    )
+
+    if viz_query:
+        figures = st.session_state.setdefault("viz_figures", [])
+        with st.spinner("Generating chart …"):
+            try:
+                graph = build_viz_graph()
+
+                # Build the state dict — pass df directly for in-memory mode
+                state = {
+                    "user_query": viz_query,
+                    "schema_info": "",
+                    "table_name": table,
+                    "existing_chart_count": len(figures),
+                    "generated_code": "",
+                    "execution_result": {},
+                    "retry_count": 0,
+                    "last_error": "",
+                }
+                if data_df is not None:
+                    state["df"] = data_df
+
+                viz_state = graph.invoke(state)
+                exec_result = viz_state.get("execution_result", {})
+                if exec_result.get("fig"):
+                    figures.append({
+                        "query": viz_query,
+                        "fig": exec_result["fig"],
+                        "code": viz_state.get("generated_code", ""),
+                    })
+                    st.session_state.viz_figures = figures
+                    st.rerun()
+                else:
+                    st.error(
+                        f"Chart generation failed: {exec_result.get('error', 'Unknown error')}"
+                    )
+            except Exception as e:
+                st.error(f"Error: {e}")
+
+    if figures and st.button("Clear All Charts"):
+        st.session_state.viz_figures = []
+        st.rerun()
 
 # ── Empty state ────────────────────────────────────────────────────────
 

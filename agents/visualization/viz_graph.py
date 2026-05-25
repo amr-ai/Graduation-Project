@@ -23,6 +23,7 @@ from langgraph.graph import END, StateGraph
 
 from agents.visualization.viz_models import VizState
 from tools.db_tools import get_schema_info, load_df_from_pg
+from tools.sandbox import sanitize_fig
 
 MAX_RETRIES = 2
 
@@ -169,8 +170,9 @@ def _executor(state: VizState) -> dict:
                 "No figures found after execution. Assign your chart to `fig` or `fig1`, `fig2`, etc."
             )
 
+        sanitized_figs = [sanitize_fig(f) for f in figs]
         return {
-            "execution_result": {"fig": figs[0], "figures": figs, "output": out, "error": ""},
+            "execution_result": {"fig": sanitized_figs[0], "figures": sanitized_figs, "output": out, "error": ""},
         }
     except Exception as e:
         tb = traceback.format_exc()

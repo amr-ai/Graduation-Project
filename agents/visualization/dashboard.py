@@ -20,7 +20,7 @@ import streamlit as st
 from groq import Groq
 
 from tools.db_tools import get_schema_info, load_df_from_pg
-from tools.sandbox import SAFE_BUILTINS, df_context
+from tools.sandbox import SAFE_BUILTINS, df_context, sanitize_fig
 
 
 def _resolve_table(table_name: str) -> str:
@@ -40,7 +40,7 @@ def _resolve_table(table_name: str) -> str:
 
 
 def generate_dashboard(
-    data_df: pd.DataFrame | None, table_name: str
+    data_df: pd.DataFrame | None, table_name: str, focus_context: str = ""
 ) -> list[dict]:
     """
     Auto-generate 5-7 diverse charts based on discovered KPIs.
@@ -51,6 +51,8 @@ def generate_dashboard(
         In-memory data.  When *None* the function loads from *table_name*.
     table_name : str
         PostgreSQL table name (used only when *data_df* is None).
+    focus_context : str, optional
+        User-specified focus areas and preferred chart types.
 
     Returns
     -------
@@ -68,6 +70,12 @@ def generate_dashboard(
 
     client = Groq(api_key=os.environ.get("GROQ_API_KEY") or "")
     model = st.session_state.get("model", "llama-3.3-70b-versatile")
+
+    focus_hint = (
+        f"\nUser preferences:\n{focus_context}\n"
+        if focus_context
+        else ""
+    )
 
     base_prompt = (
         "You are a data visualization expert. Your job has two steps.\n\n"
@@ -89,6 +97,7 @@ def generate_dashboard(
         "- Statistical spread      -> Box plot\n\n"
         "Assign each chart to fig1, fig2, fig3, fig4, fig5, fig6, fig7. "
         "Every figure MUST have a descriptive title that mentions the KPI being shown.\n\n"
+        f"{focus_hint}"
         f"Data schema:\n{schema}\n\n"
         "IMPORTANT:\n"
         "- Do NOT use import statements. "
@@ -151,13 +160,13 @@ def generate_dashboard(
         charts = []
         i = 1
         while g.get(f"fig{i}") is not None:
-            fig = g[f"fig{i}"]
+            fig = sanitize_fig(g[f"fig{i}"])
             title = fig.layout.title.text if fig.layout.title else f"Chart {i}"
             charts.append({"query": title, "fig": fig, "code": code})
             i += 1
 
         if not charts and g.get("fig"):
-            fig = g["fig"]
+            fig = sanitize_fig(g["fig"])
             title = fig.layout.title.text if fig.layout.title else "Chart"
             charts.append({"query": title, "fig": fig, "code": code})
 

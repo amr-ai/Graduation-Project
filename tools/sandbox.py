@@ -107,3 +107,36 @@ def df_context(df: pd.DataFrame) -> str:
         if len(num_cols) > 0:
             buf.write(f"\nNumeric summary:\n{df[num_cols].describe().to_string()}\n")
     return buf.getvalue()
+
+
+def _convert_value(v):
+    """Recursively convert a value to a JSON-safe type."""
+    if isinstance(v, pd.Period):
+        return str(v)
+    if isinstance(v, pd.Timestamp):
+        return v.isoformat()
+    if isinstance(v, pd.Timedelta):
+        return str(v)
+    import numpy as np
+    if isinstance(v, (np.integer,)):
+        return int(v)
+    if isinstance(v, (np.floating,)):
+        return float(v)
+    if isinstance(v, dict):
+        return {k: _convert_value(val) for k, val in v.items()}
+    if isinstance(v, list):
+        return [_convert_value(item) for item in v]
+    if isinstance(v, tuple):
+        return tuple(_convert_value(item) for item in v)
+    return v
+
+
+def sanitize_fig(fig):
+    """Convert a Plotly figure in-place, replacing non-JSON-serializable
+    types (e.g. pandas Period) with their string representations."""
+    d = fig.to_dict()
+    cleaned = _convert_value(d)
+    fig.update(data=cleaned.get("data", fig.data), layout=cleaned.get("layout", fig.layout))
+    if "frames" in cleaned:
+        fig.frames = cleaned["frames"]
+    return fig

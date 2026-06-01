@@ -158,11 +158,31 @@ def detect_order_column(df: pd.DataFrame) -> str | None:
     return candidates[0][1] if candidates else None
 
 
+_CATEGORY_EXCLUDE_KEYWORDS = [
+    "age", "gender", "sex", "birth", "date", "time", "price", "cost",
+    "revenue", "quantity", "qty", "total", "payment", "email", "phone",
+    "name", "address", "zip", "postal", "id", "score", "rating",
+    "satisfaction", "device", "returned", "refund",
+]
+
+
 def detect_category_columns(df: pd.DataFrame) -> list[str]:
     candidates = []
     for col in df.columns:
+        # Skip columns whose names match demographic / non-category patterns
+        lowered = col.lower().replace("_", "").replace("-", "").replace(" ", "")
+        excluded = any(
+            ex.replace("_", "") in lowered for ex in _CATEGORY_EXCLUDE_KEYWORDS
+        )
+        if excluded:
+            continue
+
         score = _score_column(col, _CATEGORY_KEYWORDS)
-        if score > 0 and (df[col].dtype == "object" or pd.api.types.is_categorical_dtype(df[col])):
+        if score > 0 and (
+            df[col].dtype == "object"
+            or pd.api.types.is_string_dtype(df[col])
+            or pd.api.types.is_categorical_dtype(df[col])
+        ):
             candidates.append((score, col))
     candidates.sort(key=lambda x: -x[0])
     return [c[1] for c in candidates]

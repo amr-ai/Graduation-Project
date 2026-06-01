@@ -81,6 +81,7 @@ pages = [
     st.Page("pages/1_Data_Cleaning.py", title="Data Cleaning"),
     st.Page("pages/2_Visualization.py", title="Visualization"),
     st.Page("pages/3_Business_Insights.py", title="Business Insights"),
+    st.Page("pages/4_Marketing_Agent.py", title="Marketing Agent"),
 ]
 pg = st.navigation(pages)
 pg.run()

@@ -52,7 +52,7 @@ def detect_outliers(series: pd.Series) -> bool:
     Returns True if any values fall outside 1.5 * IQR from Q1/Q3.
     Non-numeric columns always return False.
     """
-    if not pd.api.types.is_numeric_dtype(series):
+    if not pd.api.types.is_numeric_dtype(series) or pd.api.types.is_bool_dtype(series):
         return False
 
     clean = series.dropna()
@@ -79,7 +79,7 @@ def compute_numeric_stats(series: pd.Series) -> dict | None:
 
     Stats: min, max, mean, std, skewness.
     """
-    if not pd.api.types.is_numeric_dtype(series):
+    if not pd.api.types.is_numeric_dtype(series) or pd.api.types.is_bool_dtype(series):
         return None
 
     clean = series.dropna()

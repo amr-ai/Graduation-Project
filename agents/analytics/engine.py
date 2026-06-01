@@ -26,6 +26,9 @@ from .timeseries import compute_timeseries
 from .quality import compute_quality
 from .schema_intel import build_schema_summary
 
+from agents.marketing.category_performance import compute_category_performance
+from agents.marketing.customer_segmentation import compute_customer_segmentation
+
 
 def run_analytics(
     data_df: pd.DataFrame | None = None,
@@ -61,11 +64,16 @@ def run_analytics(
     timeseries = compute_timeseries(df)
     quality = compute_quality(df)
 
+    category_perf = compute_category_performance(df)
+    customer_seg = compute_customer_segmentation(df)
+
     payload = {
         "schema": schema,
         "kpi": kpi,
         "timeseries": timeseries,
         "quality": quality,
+        "category_performance": category_perf,
+        "customer_segmentation": customer_seg,
         "metadata": {
             "row_count": len(df),
             "column_count": len(df.columns),

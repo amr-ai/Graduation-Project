@@ -454,7 +454,7 @@ network-free and LLM-free by design (the LLM layers are thin and exercised manua
 See `FEATURE_ROADMAP.md` for the prioritised plan addressing these and adding new value.
 
 ---
-
+## test
 ## Recent enhancements
 
 - **Forecasting** — replaced the placeholder "Auto" (which always ran Prophet and reported

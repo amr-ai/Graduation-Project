@@ -183,7 +183,30 @@ for i, out in enumerate(outputs):
         st.markdown("**Horizon forecasts (mean)**")
         st.json(out["horizons"])
 
-    st.markdown(f"**Summary:** {out.get('business_summary', '')}")
+    if out.get("business_summary"):
+        st.markdown(f"**Summary:** {out['business_summary']}")
+
+    risks = out.get("risks") or []
+    opps = out.get("opportunities") or []
+    actions = out.get("recommended_actions") or []
+    if risks or opps or actions:
+        col_r, col_o, col_a = st.columns(3)
+        if risks:
+            with col_r:
+                st.markdown("**Risks**")
+                for r in risks:
+                    st.markdown(f"- {r}")
+        if opps:
+            with col_o:
+                st.markdown("**Opportunities**")
+                for o in opps:
+                    st.markdown(f"- {o}")
+        if actions:
+            with col_a:
+                st.markdown("**Actions**")
+                for a in actions:
+                    st.markdown(f"- {a}")
+
     with st.expander("Full agent output (Strategy / Marketing)"):
         st.json(out)
 

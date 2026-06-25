@@ -13,13 +13,11 @@ Returns a structured payload consumable by downstream AI agents
 
 from __future__ import annotations
 
-import os
 from datetime import datetime, timezone
 
 import pandas as pd
-import streamlit as st
 
-from tools.db_tools import get_schema_info, load_df_from_pg
+from tools.db_tools import load_df_from_pg
 
 from .kpi_engine import compute_kpis
 from .timeseries import compute_timeseries

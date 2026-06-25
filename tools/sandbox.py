@@ -41,7 +41,7 @@ SAFE_BUILTINS: dict[str, Any] = {
     "zip": zip,
     "isinstance": isinstance,
     "hasattr": hasattr,
-    "getattr": getattr,
+    # getattr is intentionally omitted — it can be used to walk __class__.__mro__
     "type": type,
     "filter": filter,
     "map": map,
@@ -52,6 +52,20 @@ SAFE_BUILTINS: dict[str, Any] = {
     "KeyError": KeyError,
     "Exception": Exception,
 }
+
+_BLOCKED_PATTERNS = [
+    "__class__", "__bases__", "__subclasses__", "__globals__",
+    "__builtins__", "__import__", "eval(", "exec(", "compile(",
+    "open(", "os.system", "subprocess", "socket",
+]
+
+
+def _check_code_safety(code: str) -> str | None:
+    """Return an error string if the code contains a blocked pattern, else None."""
+    for pattern in _BLOCKED_PATTERNS:
+        if pattern in code:
+            return f"Blocked: code contains disallowed pattern '{pattern}'"
+    return None
 
 
 def strip_fences(code: str) -> str:
@@ -79,6 +93,9 @@ def run_analysis(code: str, df: pd.DataFrame) -> dict:
     Times out after 30 seconds; output capped at 1 MB.
     """
     code = strip_fences(code)
+    safety_error = _check_code_safety(code)
+    if safety_error:
+        return {"output": "", "error": safety_error, "df": df}
     buffer = io.StringIO()
 
     def _sandbox_print(*a, **kw):

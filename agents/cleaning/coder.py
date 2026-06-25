@@ -10,13 +10,13 @@ self-correct.
 from __future__ import annotations
 
 import os
-import re
 from pathlib import Path
 
 from groq import Groq
 
 from core.state import GraphState
 from models.profiler_models import DatasetProfile
+from tools.sandbox import strip_fences as _strip_markdown_fences
 
 _PROMPT_DIR = Path(__file__).resolve().parent.parent.parent / "prompts"
 
@@ -25,16 +25,6 @@ def _load_prompt(filename: str) -> str:
     """Load a system prompt from the prompts/ folder."""
     path = _PROMPT_DIR / filename
     return path.read_text(encoding="utf-8")
-
-
-def _strip_markdown_fences(code: str) -> str:
-    """Remove ```python ... ``` fences if the LLM wrapped its output."""
-    code = code.strip()
-    # Remove opening fence
-    code = re.sub(r"^```(?:python)?\s*\n?", "", code)
-    # Remove closing fence
-    code = re.sub(r"\n?```\s*$", "", code)
-    return code.strip()
 
 
 def coder_node(state: GraphState) -> dict:

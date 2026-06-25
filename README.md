@@ -349,6 +349,7 @@ PG_PASSWORD=postgres
 ```bash
 # Launch the full multipage web app (primary way to use the project)
 streamlit run streamlit_app.py
+python -m streamlit run streamlit_app.py #for mac
 
 # Run the cleaning pipeline only, from the terminal (uses data/sample.csv)
 python main.py
@@ -439,12 +440,15 @@ network-free and LLM-free by design (the LLM layers are thin and exercised manua
 ## Design notes & known limitations
 
 - **Sandbox is restricted, not bulletproof.** `tools/sandbox.py` / `agents/cleaning/executor.py`
-  run LLM-generated code with a restricted `__builtins__`. This blocks casual misuse but is not
-  a true security boundary (Python sandbox escapes exist). For untrusted input, move execution
-  to a subprocess/container or a whitelisted operation set. *(Planned hardening.)*
-- **Forecasting LLM narrative is not wired into the graph.** `agents/forecasting/interpreter.py`
-  exists but the graph is validate→prepare→forecast→END, so `business_summary` is currently
-  produced by a fallback rather than the interpreter node. *(Easy follow-up: add the node.)*
+  run LLM-generated code with a shared restricted `__builtins__` allow-list plus a blocked-pattern
+  pre-scan (`__class__`, `__subclasses__`, `__import__`, `open(`, `subprocess`, …) and `getattr`
+  removed. This blocks casual misuse and the common escape vectors, but is still not a true
+  security boundary (Python sandbox escapes exist). For fully untrusted input, move execution to a
+  subprocess/container or a whitelisted operation set. *(Planned hardening.)*
+- **Forecasting LLM narrative is wired into the graph.** The graph is
+  validate→prepare→forecast→interpret→END; `agents/forecasting/interpreter.py` enriches every
+  forecast output with a grounded `business_summary` + risks/opportunities/actions, falling back
+  to a deterministic summary when no API key is set.
 - **Single LLM provider.** Everything uses Groq; a provider-abstraction layer would allow
   fallback/other providers.
 - **State is session-scoped.** Analyses live in `st.session_state` (and optionally Postgres);
@@ -454,7 +458,6 @@ network-free and LLM-free by design (the LLM layers are thin and exercised manua
 See `FEATURE_ROADMAP.md` for the prioritised plan addressing these and adding new value.
 
 ---
-## test
 ## Recent enhancements
 
 - **Forecasting** — replaced the placeholder "Auto" (which always ran Prophet and reported

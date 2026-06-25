@@ -31,6 +31,8 @@ class ForecastState(TypedDict, total=False):
     forecast_evaluations: list[dict[str, Any]]
     forecast_history_rows: list[dict[str, Any]]
 
+    interpretations: list[dict[str, Any]]
+
     errors: list[str]
     error: str | None
     completed_at: str | None

@@ -23,70 +23,84 @@ Return valid JSON:
 """
 
 
-def interpret_node(state: ForecastState) -> dict:
-    """Enrich the latest forecast output with LLM business narrative."""
-    idx = state["current_target_index"]
-    outputs = list(state.get("forecast_outputs", []))
-    interpretations = list(state.get("interpretations", []))
+def _interpret_one(record: dict, business_context: str, client: "Groq", model: str) -> dict:
+    """Enrich a single forecast record with LLM narrative. Returns the enriched record."""
+    ctx = {k: record.get(k) for k in (
+        "metric", "current_value", "forecasted_value", "change_percent",
+        "confidence_score", "selected_model", "evaluation", "key_drivers",
+        "business_impact", "trend", "horizons",
+    )}
+    if business_context:
+        ctx["business_context"] = business_context
+    try:
+        reply = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": _SYSTEM},
+                {"role": "user", "content": json.dumps(ctx, indent=2)},
+            ],
+            temperature=0.3,
+            max_tokens=1024,
+            response_format={"type": "json_object"},
+        )
+        llm = json.loads(reply.choices[0].message.content.strip())
+        record = {**record,
+                  "business_summary": llm.get("business_summary", ""),
+                  "risks": llm.get("risks", []),
+                  "opportunities": llm.get("opportunities", []),
+                  "recommended_actions": llm.get("recommended_actions", [])}
+    except Exception:
+        pass
+    return record
 
-    if idx >= len(outputs):
-        return {}
 
-    record = dict(outputs[idx])
-    api_key = os.environ.get("GROQ_API_KEY")
-    from agents.constants import DEFAULT_FORECAST_MODEL
-    model = DEFAULT_FORECAST_MODEL
-
-    if api_key:
-        try:
-            client = Groq(api_key=api_key)
-            ctx = {k: record.get(k) for k in (
-                "metric", "current_value", "forecasted_value", "change_percent",
-                "confidence_score", "selected_model", "evaluation", "key_drivers",
-                "business_impact", "trend", "horizons",
-            )}
-            if state.get("business_context"):
-                ctx["business_context"] = state["business_context"]
-
-            reply = client.chat.completions.create(
-                model=model,
-                messages=[
-                    {"role": "system", "content": _SYSTEM},
-                    {"role": "user", "content": json.dumps(ctx, indent=2)},
-                ],
-                temperature=0.3,
-                max_tokens=1024,
-                response_format={"type": "json_object"},
-            )
-            llm = json.loads(reply.choices[0].message.content.strip())
-            record["business_summary"] = llm.get("business_summary", "")
-            record["risks"] = llm.get("risks", [])
-            record["opportunities"] = llm.get("opportunities", [])
-            record["recommended_actions"] = llm.get("recommended_actions", [])
-        except Exception:
-            pass
-
-    if not record.get("business_summary"):
-        m = record.get("metric", "Metric")
-        chg = record.get("change_percent", 0)
-        record["business_summary"] = (
+def _fallback(record: dict) -> dict:
+    m = record.get("metric", "Metric")
+    chg = record.get("change_percent", 0)
+    return {
+        **record,
+        "business_summary": (
             f"{m.replace('_', ' ').title()} is projected to change by {chg:+.1f}% "
             f"over {record.get('forecast_horizon', '30_days')}. "
             f"Model: {record.get('selected_model', 'n/a')}."
-        )
-        record.setdefault("risks", ["Market shifts may alter actual results"])
-        record.setdefault("opportunities", ["Use forecast for inventory and campaign planning"])
-        record.setdefault("recommended_actions", ["Compare actuals to forecast weekly"])
-
-    outputs[idx] = record
-    interpretations.append({
-        "executive_summary": record.get("business_summary", ""),
-        "risks": record.get("risks", []),
-        "opportunities": record.get("opportunities", []),
-        "recommended_actions": record.get("recommended_actions", []),
-        "confidence_statement": (
-            f"Confidence {record.get('confidence_score', 0):.0%} based on backtest error."
         ),
-    })
+        "risks": record.get("risks") or ["Market shifts may alter actual results"],
+        "opportunities": record.get("opportunities") or ["Use forecast for inventory and campaign planning"],
+        "recommended_actions": record.get("recommended_actions") or ["Compare actuals to forecast weekly"],
+    }
 
-    return {"forecast_outputs": outputs, "interpretations": interpretations}
+
+def interpret_node(state: ForecastState) -> dict:
+    """Enrich all forecast outputs with LLM business narrative (batch)."""
+    outputs = list(state.get("forecast_outputs", []))
+    if not outputs:
+        return {}
+
+    api_key = os.environ.get("GROQ_API_KEY")
+    from agents.constants import DEFAULT_FORECAST_MODEL
+    model = state.get("model") or DEFAULT_FORECAST_MODEL
+    business_context = state.get("business_context", "")
+
+    client = Groq(api_key=api_key) if api_key else None
+    enriched: list[dict] = []
+    interpretations: list[dict] = []
+
+    for record in outputs:
+        record = dict(record)
+        if client:
+            record = _interpret_one(record, business_context, client, model)
+        if not record.get("business_summary"):
+            record = _fallback(record)
+        enriched.append(record)
+        interpretations.append({
+            "metric": record.get("metric", ""),
+            "executive_summary": record.get("business_summary", ""),
+            "risks": record.get("risks", []),
+            "opportunities": record.get("opportunities", []),
+            "recommended_actions": record.get("recommended_actions", []),
+            "confidence_statement": (
+                f"Confidence {record.get('confidence_score', 0):.0%} based on backtest error."
+            ),
+        })
+
+    return {"forecast_outputs": enriched, "interpretations": interpretations}

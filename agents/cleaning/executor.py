@@ -15,42 +15,12 @@ import traceback
 import pandas as pd
 
 from core.state import GraphState
+from tools.sandbox import SAFE_BUILTINS as _SANDBOX_BUILTINS, _check_code_safety
 
-# Restricted globals for the sandboxed exec environment.
-# Only pandas and a handful of safe builtins are exposed.
-SAFE_BUILTINS = {
-    "print": print,   # will be redirected to StringIO
-    "range": range,
-    "len": len,
-    "int": int,
-    "float": float,
-    "str": str,
-    "bool": bool,
-    "list": list,
-    "dict": dict,
-    "tuple": tuple,
-    "set": set,
-    "round": round,
-    "min": min,
-    "max": max,
-    "abs": abs,
-    "sum": sum,
-    "sorted": sorted,
-    "enumerate": enumerate,
-    "zip": zip,
-    "isinstance": isinstance,
-    "hasattr": hasattr,
-    "getattr": getattr,
-    "type": type,
-    "filter": filter,
-    "map": map,
-    "any": any,
-    "all": all,
-    "ValueError": ValueError,
-    "TypeError": TypeError,
-    "KeyError": KeyError,
-    "Exception": Exception,
-}
+# Restricted globals for the sandboxed exec environment — reuse the same
+# allow-list and blocked-pattern policy as tools/sandbox.py so both
+# code-execution surfaces (cleaning and chat/visualization) stay in sync.
+SAFE_BUILTINS = dict(_SANDBOX_BUILTINS)
 
 
 def executor_node(state: GraphState) -> dict:
@@ -66,6 +36,16 @@ def executor_node(state: GraphState) -> dict:
     retry_count = state.get("retry_count", 0)
 
     print("\n-- Executor: running generated code ...")
+
+    # Reject code containing sandbox-escape patterns before executing it.
+    safety_error = _check_code_safety(code)
+    if safety_error:
+        print(f"   [X] {safety_error}")
+        return {
+            "execution_result": {"success": False, "clean_df": None, "error": safety_error},
+            "retry_count": retry_count + 1,
+            "last_error": safety_error,
+        }
 
     # Capture stdout from the generated code's print() calls
     captured_output = io.StringIO()

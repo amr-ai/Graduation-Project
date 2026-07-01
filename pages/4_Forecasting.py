@@ -15,8 +15,10 @@ from groq import Groq
 from agents.forecasting.metric_discovery import rank_metrics
 from agents.constants import DEFAULT_FORECAST_MODEL
 from agents.forecasting.pipeline import ForecastPipeline, DEFAULT_HORIZONS
+from agents.forecasting.report import build_forecast_report_md
 from agents.forecasting.tools.engines import ForecastEngine
 from agents.forecasting.validation import list_forecastable_metrics
+from agents.reporting.render import build_meta, render_report
 from tools.sandbox import df_context, run_analysis
 
 
@@ -84,9 +86,35 @@ selected_metrics = st.multiselect(
     max_selections=3,
 )
 
+# Recommend a granularity from how much history there is — volatile daily
+# transaction data forecasts far more reliably when aggregated to weeks/months.
+_dates = pd.to_datetime(df[date_col], errors="coerce").dropna()
+_span_days = (_dates.max() - _dates.min()).days if len(_dates) else 0
+_rec = "monthly" if _span_days > 540 else "weekly" if _span_days > 120 else "daily"
+
+cg1, cg2 = st.columns([1, 2])
+with cg1:
+    gran_choice = st.selectbox(
+        "Forecast granularity",
+        ["Auto", "Daily", "Weekly", "Monthly"],
+        index=0,
+        help=(
+            "Aggregate the series before forecasting. Weekly/monthly smooth out "
+            "day-to-day noise, so the back-test error is lower and the confidence "
+            "more meaningful. 'Auto' picks based on how much history you have."
+        ),
+    )
+granularity = _rec if gran_choice == "Auto" else gran_choice.lower()
+with cg2:
+    st.caption(
+        f"Using **{granularity}** granularity"
+        + (f" (auto — recommended for ~{_span_days} days of history)" if gran_choice == "Auto" else "")
+        + ". Additive metrics (revenue, quantity) are summed per period; rates are averaged."
+    )
+
 c1, c2, c3 = st.columns(3)
 with c1:
-    horizon = st.selectbox("Primary horizon", [7, 30, 90], index=1)
+    horizon = st.selectbox("Primary horizon (days)", [7, 30, 90], index=1)
 with c2:
     extra_h = st.multiselect("Also compute", DEFAULT_HORIZONS, default=DEFAULT_HORIZONS)
 with c3:
@@ -114,6 +142,7 @@ if st.button("Run Forecast", type="primary"):
                 standard_horizons=sorted(set(extra_h) | {horizon}),
                 metrics=selected_metrics,
                 model_override=model_override,
+                granularity=granularity,
                 business_context=business_context,
                 forecast_model=st.session_state.get("forecast_model", DEFAULT_FORECAST_MODEL),
                 table_name=table,
@@ -147,16 +176,18 @@ for i, out in enumerate(outputs):
     st.divider()
     st.subheader(out.get("metric", "Metric").replace("_", " ").title())
 
+    conf = out.get("confidence_score")
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Model", out.get("selected_model", "—"))
     c2.metric("Forecast", f"{out.get('forecasted_value', 0):,.0f}")
     c3.metric("Change", f"{out.get('change_percent', 0):+.1f}%")
-    c4.metric("Confidence", f"{out.get('confidence_score', 0):.0%}")
+    c4.metric("Confidence", f"{conf:.0%}" if conf is not None else "not back-tested")
 
     ev = out.get("evaluation", {})
     skill = out.get("skill_score")
     skill_txt = f" · Skill vs naive: **{skill * 100:+.0f}%**" if skill is not None else ""
     st.caption(
+        f"Granularity: **{out.get('granularity', 'daily')}** · "
         f"Back-test (out-of-sample) — MAE {ev.get('mae', '—')} · RMSE {ev.get('rmse', '—')} · "
         f"MAPE {ev.get('mape', '—')}%{skill_txt} · Impact: **{out.get('business_impact', '—')}**"
     )
@@ -213,3 +244,34 @@ for i, out in enumerate(outputs):
 storage = results.get("storage_result", {})
 if storage.get("status") == "stored":
     st.success(f"Saved to PostgreSQL · `{storage.get('run_id', results.get('run_id'))}`")
+
+# ── Consolidated, exportable forecast report ────────────────────────────────
+forecast_report_md = build_forecast_report_md(results)
+if forecast_report_md:
+    st.divider()
+    st.subheader("Forecast Report")
+
+    kpi_cards: list[tuple[str, str]] = []
+    for out in outputs[:4]:
+        name = out.get("metric", "Metric").replace("_", " ").title()
+        chg = out.get("change_percent")
+        val = f"{out.get('forecasted_value', 0):,.0f}"
+        if chg is not None:
+            val += f"  ({chg:+.1f}%)"
+        kpi_cards.append((name, val))
+
+    meta = build_meta(
+        "Forecasting",
+        model=st.session_state.get("forecast_model", DEFAULT_FORECAST_MODEL),
+        dataset=(table or "In-memory data"),
+        extra={"Run": results.get("run_id", "")},
+    )
+    render_report(
+        "Sales & Demand Forecast",
+        forecast_report_md,
+        meta=meta,
+        payloads=[outputs],
+        kpis=kpi_cards,
+        subtitle="Back-tested forecasts with out-of-sample error, grounded in your data",
+        filename_stem="forecast_report",
+    )

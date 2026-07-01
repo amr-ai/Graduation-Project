@@ -112,6 +112,55 @@ def holt_winters(train_y, h, freq, train_dates=None) -> np.ndarray:
     return fc
 
 
+def theta(train_y, h, freq, train_dates=None) -> np.ndarray:
+    """Theta method — the M3-competition winner: a robust decomposition of the
+    series into long-run trend and short-run curvature. Excellent default."""
+    from statsmodels.tsa.forecasting.theta import ThetaModel
+
+    y = np.asarray(train_y, dtype=float)
+    n = len(y)
+    m = season_length(freq, n)
+    seasonal = m if (m >= 2 and n >= 2 * m) else None
+    s = pd.Series(y)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        res = ThetaModel(
+            s, period=seasonal, deseasonalize=bool(seasonal), method="auto"
+        ).fit()
+        fc = np.asarray(res.forecast(h), dtype=float)
+    return fc
+
+
+def ets(train_y, h, freq, train_dates=None) -> np.ndarray:
+    """Error-Trend-Seasonal state-space exponential smoothing (damped trend)."""
+    from statsmodels.tsa.exponential_smoothing.ets import ETSModel
+
+    y = np.asarray(train_y, dtype=float)
+    n = len(y)
+    m = season_length(freq, n)
+    seasonal = "add" if (m >= 2 and n >= 2 * m) else None
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        fit = ETSModel(
+            y, error="add", trend="add", damped_trend=True,
+            seasonal=seasonal, seasonal_periods=m if seasonal else None,
+        ).fit(disp=False)
+        fc = np.asarray(fit.forecast(h), dtype=float)
+    return fc
+
+
+def arima(train_y, h, freq, train_dates=None) -> np.ndarray:
+    """ARIMA(1,1,1) — a classical, differenced auto-regressive baseline."""
+    from statsmodels.tsa.arima.model import ARIMA
+
+    y = np.asarray(train_y, dtype=float)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        fit = ARIMA(y, order=(1, 1, 1)).fit()
+        fc = np.asarray(fit.forecast(h), dtype=float)
+    return fc
+
+
 def prophet_point(train_y, h, freq, train_dates=None) -> np.ndarray:
     """Point forecast from a lightweight Prophet fit (no uncertainty sampling).
 
@@ -150,6 +199,9 @@ MODELS: dict[str, dict] = {
     "Moving Average": {"fn": moving_average, "min_n": 3, "needs": None},
     "Linear Trend": {"fn": linear_trend, "min_n": 4, "needs": None},
     "Holt-Winters": {"fn": holt_winters, "min_n": 8, "needs": "statsmodels"},
+    "Theta": {"fn": theta, "min_n": 8, "needs": "statsmodels"},
+    "ETS": {"fn": ets, "min_n": 10, "needs": "statsmodels"},
+    "ARIMA": {"fn": arima, "min_n": 12, "needs": "statsmodels"},
     "Prophet": {"fn": prophet_point, "min_n": 24, "needs": "prophet"},
 }
 

@@ -67,6 +67,13 @@ exports without configuration.
    columns are all handled with safe fallbacks.
 6. **Separation of concerns.** Each agent is a self-contained package: deterministic engine,
    optional LLM layer, optional persistence, and a UI page.
+7. **Verifiable output.** Every generated report is passed through a **grounding check**
+   (`agents/reporting/grounding.py`) that traces each figure in the narrative back to a
+   computed value and flags anything it cannot match — a measurable guard against
+   hallucinated numbers, surfaced as a badge in the UI and in the export.
+8. **Portable deliverables.** Insights, Marketing, Churn and Forecast reports export to a
+   styled, self-contained, print-ready HTML document (open → *Save as PDF*) and to raw
+   Markdown, so the output is board-ready — with zero extra dependencies.
 
 ---
 
@@ -159,10 +166,22 @@ The analytical backbone reused by Insights, Marketing, and Churn.
 - `engine.py` — `run_analytics(df)` orchestrates all of the above into one payload.
 
 ### 3. Visualization  (`agents/visualization/`, `pages/2_Visualization.py`)
+- `builder.py` — `build_executive_dashboard(df)`: a **deterministic** board-quality dashboard
+  (KPI cards + curated charts — revenue trend, category & product leaders, customer mix,
+  monthly/day-of-week seasonality, order-value distribution) computed straight from the
+  schema/KPI engine, so it is always correct and consistent. Uses a corrected revenue series
+  (price × quantity when only a unit price exists) and non-overlapping customer segmentation.
+- `theme.py` — the registered `smart_analyst` Plotly template (palette, typography, gridlines)
+  + `style_figure()` so **every** chart, deterministic or AI-written, shares one house style,
+  plus number-formatting helpers.
+- `export.py` — `build_dashboard_html()`: bundles the whole dashboard into one self-contained,
+  interactive, print-to-PDF HTML file.
 - `viz_graph.py` — chat-to-chart: user asks in natural language → LLM writes Plotly code →
-  executed in the sandbox → figure rendered. Retries on error.
+  executed in the sandbox → figure rendered (themed). Retries on error.
 - `dashboard.py` — `generate_dashboard()` asks the LLM to identify KPIs and emit 5–7 diverse
-  charts in one pass, with automatic error-repair retries.
+  charts in one pass, with professional-quality rules + automatic error-repair retries.
+- The page renders a KPI band + responsive grid canvas with **live slicers** (date range +
+  category) that re-filter and rebuild the dashboard instantly.
 - `viz_models.py` — `VizState` TypedDict.
 
 ### 4. Business Insights  (`agents/insights/`, `pages/3_Business_Insights.py`)
@@ -172,20 +191,28 @@ The analytical backbone reused by Insights, Marketing, and Churn.
   payload to the LLM. Templates live in `prompts/insights/`.
 
 ### 5. Forecasting  (`agents/forecasting/`, `pages/4_Forecasting.py`)
-A LangGraph pipeline with a **real, back-tested model selector**.
-- `pipeline.py` — `ForecastPipeline.run(...)` builds state and invokes the graph; persists
-  results if configured.
-- `graph.py` / `nodes.py` — validate → prepare → forecast. `forecast_node` forecasts each
-  target metric (in parallel).
-- `validation.py` — date-column detection, frequency, history sufficiency, metric discovery.
+A LangGraph pipeline with a **real, back-tested model selector** and honest confidence.
+- `pipeline.py` — `ForecastPipeline.run(..., granularity=...)` builds state and invokes the
+  graph; persists results if configured.
+- `graph.py` / `nodes.py` — validate → prepare → forecast → interpret. `forecast_node`
+  forecasts each target metric in parallel, at the chosen **granularity** (daily/weekly/
+  monthly): additive metrics (revenue, quantity) are summed per period, rates averaged, and
+  day-based horizons are converted to periods.
+- `validation.py` / `metric_discovery.py` — date detection, frequency, history sufficiency,
+  and metric ranking that prioritises the true revenue column.
 - `tools/models.py` — model library: Naive, Seasonal Naive, Drift, Moving Average,
-  Linear Trend, Holt-Winters (optional, statsmodels), Prophet.
+  Linear Trend, Holt-Winters, **Theta** (M3 winner), **ETS**, **ARIMA** (statsmodels),
+  Prophet.
 - `tools/backtest.py` — **rolling-origin cross-validation**, `select_model` (ranks by
-  out-of-sample MAPE), `skill_vs_naive`.
+  out-of-sample MAPE), `skill_vs_naive`; seasonal series are now reliably back-testable.
 - `tools/engines.py` — `ForecastEngine.run(model, series, horizon)`: when `model="Auto"`,
   back-tests all candidates and picks the winner; reports honest out-of-sample metrics,
   a selection reason, the leaderboard, and a skill score.
-- `interpreter.py` — LLM business narrative (exists; see limitations).
+- Confidence = a principled, bounded transform of the back-test error rewarded for beating
+  the naive baseline; it is **`None` ("not back-tested")** rather than a fabricated number
+  when a series can't be cross-validated.
+- `interpreter.py` — LLM business narrative (wired into the graph). `report.py` assembles the
+  exportable, grounded forecast report.
 - `schema.py` — `ForecastOutput` / `ForecastEvaluation` pydantic models.
 - `storage.py` — PostgreSQL persistence of runs/forecasts/evaluations/history.
 
@@ -203,10 +230,13 @@ Supervised churn modelling on transaction data.
   AOV, inter-purchase gap, product/category diversity, discount usage), all measured as-of a
   cutoff date.
 - `model.py` — **windowed labelling** (features as-of `cutoff = snapshot − horizon`; label =
-  "did NOT purchase in the next horizon") + `GradientBoostingClassifier`, with a recency
-  heuristic fallback for small/single-class data.
+  "did NOT purchase in the next horizon") + `GradientBoostingClassifier` with **probability
+  calibration** (so a 0.7 really means ~70% risk), and a recency heuristic fallback for
+  small/single-class data.
 - `engine.py` — `run_churn_analysis()` → payload: model metrics (AUC, precision, recall),
-  feature importance, risk tiers, revenue-at-risk, and the top at-risk customers.
+  feature importance, risk tiers, revenue-at-risk **and expected (probability-weighted)
+  revenue-at-risk**, and the top at-risk customers **ranked by expected value at risk
+  (churn probability × spend)** with a per-customer `expected_loss`.
 - `agent.py` + `prompts/churn/strategy.md` — LLM retention strategy grounded in the payload.
 - `storage.py` — PostgreSQL persistence.
 
@@ -272,13 +302,15 @@ the other agents are disabled until cleaned data exists.
 │   ├── constants.py            # AVAILABLE_MODELS + DEFAULT_*_MODEL + DEFAULT_HORIZONS
 │   ├── cleaning/               # profiler, planner, coder, executor, validator
 │   ├── analytics/              # schema_intel, kpi_engine, timeseries, quality, engine
-│   ├── visualization/          # viz_graph, dashboard, viz_models
+│   ├── visualization/          # builder (deterministic dashboard), theme, export,
+│   │                           #   viz_graph, dashboard (AI charts), viz_models
 │   ├── insights/               # agent, template_selector
 │   ├── forecasting/            # pipeline, graph, nodes, validation, metric_discovery,
-│   │   │                       #   interpreter, schema, storage, forecast_models
+│   │   │                       #   interpreter, report, schema, storage, forecast_models
 │   │   └── tools/              # models, backtest, engines, evaluation
 │   ├── marketing/              # segmentation, engine, agent, storage
-│   └── churn/                  # features, model, engine, agent, storage
+│   ├── churn/                  # features, model, engine, agent, storage
+│   └── reporting/             # grounding (faithfulness check), export (HTML/PDF), render
 │
 ├── prompts/
 │   ├── planner_prompt.txt  coder_prompt.txt  repair_prompt.txt
@@ -309,6 +341,16 @@ the other agents are disabled until cleaned data exists.
   `get_schema_info()`; identifiers validated against SQL-injection.
 - **`agents/analytics/schema_intel.py`** — the column-role detector that makes the whole
   platform "configuration-free".
+- **`agents/reporting/`** — the shared report layer used by every narrative-producing agent:
+  - `grounding.py` — `check_grounding(report, *payloads)` extracts the material figures
+    (currency, percentages, large numbers) from a report and verifies each against the
+    deterministic payload, returning a coverage score and the list of unmatched figures.
+    Handles fraction-vs-percent (`0.083` ↔ `8.3%`), magnitude suffixes (`$1.2M`), and
+    sensible rounding; ignores structural counts and years. Pure stdlib, unit-tested.
+  - `export.py` — `build_html_report(...)` and a dependency-free `markdown_to_html(...)`
+    that produce the styled, print-ready HTML deliverable.
+  - `render.py` — `render_report(...)`, the single Streamlit presentation used by all four
+    report pages (header band, KPI strip, grounding badge, HTML + Markdown downloads).
 
 ---
 
@@ -460,6 +502,32 @@ See `FEATURE_ROADMAP.md` for the prioritised plan addressing these and adding ne
 ---
 ## Recent enhancements
 
+- **Churn & Marketing correctness/quality** — fixed a shared KPI bug where `new_customers`
+  equalled *total* (so `new_customer_pct` was always ~100%); new vs returning is now a correct
+  non-overlapping partition (one-time vs repeat), which also corrects the Marketing report.
+  Churn now **ranks at-risk customers by expected value at risk** (probability × spend) with a
+  per-customer `expected_loss` and an **expected-revenue-at-risk** KPI, and **calibrates** the
+  churn probabilities so scores are trustworthy. Tests updated in `tests/test_churn.py`,
+  `tests/test_kpi_engine.py`.
+- **Forecasting accuracy & honesty** — additive metrics are now summed (not averaged) per
+  period; a **granularity control** (daily/weekly/monthly) lets volatile daily series be
+  forecast where the back-test error is meaningful (on Bloom & Bean, weekly revenue moved from
+  a daily 90% MAPE / 37% confidence to Seasonal Naive at 29% MAPE / **70% confidence, +68%
+  skill vs naive**); three professional models added (**Theta, ETS, ARIMA**); the confidence
+  score is now a principled transform of back-test error and reports **"not back-tested"**
+  instead of a fake number; metric ranking prioritises real revenue. Tests:
+  `tests/test_forecast_upgrades.py`.
+- **Executive Visualization dashboard** — the Visualization agent now leads with a
+  deterministic, themed, board-quality dashboard (KPI band + curated charts, one house
+  Plotly theme, live date/category slicers, one-click interactive-HTML export) instead of a
+  tab strip of ad-hoc LLM charts; AI charts remain for anything custom, matched to the theme.
+  New: `agents/visualization/{theme,builder,export}.py`.
+- **Professional reporting layer (`agents/reporting/`)** — all four narrative agents
+  (Insights, Marketing, Churn, Forecasting) now render through one shared presentation with
+  a run-metadata header, a KPI strip, a **grounding/faithfulness badge** that verifies every
+  figure against the computed data, and one-click export to styled **HTML (print-to-PDF)** and
+  Markdown. The forecast narrative is assembled deterministically from the pipeline output
+  (`agents/forecasting/report.py`). No new dependencies. Tests: `tests/test_reporting.py`.
 - **Forecasting** — replaced the placeholder "Auto" (which always ran Prophet and reported
   in-sample metrics) with a real multi-model library + rolling-origin cross-validation +
   honest out-of-sample selection, a back-test leaderboard, and a skill-vs-naive score.

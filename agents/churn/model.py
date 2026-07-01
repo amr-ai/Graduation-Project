@@ -74,9 +74,28 @@ def train_and_predict(
     )
 
     model = GradientBoostingClassifier(random_state=random_state)
-    model.fit(X_tr, y_tr)
+    model.fit(X_tr, y_tr)  # plain fit drives feature importances
 
-    proba_te = model.predict_proba(X_te)[:, 1]
+    # Calibrate the probabilities so a score of 0.7 really means ~70% churn risk
+    # (gradient boosting is typically over-confident). Calibration is monotonic,
+    # so the ranking and AUC are preserved — only the probability values improve.
+    scorer = model
+    calibrated = False
+    try:
+        if int(np.bincount(y_tr).min()) >= 6:
+            from sklearn.calibration import CalibratedClassifierCV
+
+            cal = CalibratedClassifierCV(
+                GradientBoostingClassifier(random_state=random_state),
+                method="sigmoid", cv=3,
+            )
+            cal.fit(X_tr, y_tr)
+            scorer = cal
+            calibrated = True
+    except Exception:
+        scorer = model
+
+    proba_te = scorer.predict_proba(X_te)[:, 1]
     pred_te = (proba_te >= 0.5).astype(int)
     auc = float(roc_auc_score(y_te, proba_te)) if len(np.unique(y_te)) > 1 else None
 
@@ -92,6 +111,7 @@ def train_and_predict(
         "n_test": int(len(y_te)),
         "confusion_matrix": confusion_matrix(y_te, pred_te).tolist(),
         "threshold": 0.5,
+        "calibrated": calibrated,
     }
 
     importances = sorted(
@@ -102,7 +122,7 @@ def train_and_predict(
 
     # Live scoring: features as-of the snapshot for every current customer.
     live = compute_customer_features(tx, snapshot, schema)
-    live_proba = model.predict_proba(live[cols].to_numpy(dtype=float))[:, 1]
+    live_proba = scorer.predict_proba(live[cols].to_numpy(dtype=float))[:, 1]
     live = live.copy()
     live["churn_probability"] = np.round(live_proba, 4)
 

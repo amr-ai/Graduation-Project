@@ -111,13 +111,52 @@ def prophet_params(df_p: pd.DataFrame) -> dict[str, Any]:
     return params
 
 
-def prepare_data(df: pd.DataFrame, date_col: str, value_col: str) -> pd.DataFrame:
-    work = df[[date_col, value_col]].dropna().copy()
-    work["ds"] = pd.to_datetime(work[date_col])
-    work["y"] = pd.to_numeric(work[value_col])
-    work = work.sort_values("ds").reset_index(drop=True)
-    work = work.groupby("ds", as_index=False)["y"].mean()
-    return work[["ds", "y"]]
+# Metrics that accumulate over a period (sum them per day/week/month) vs. rates
+# that should be averaged. "total_price" -> additive (has "total"); "unit_price"
+# / "discount_pct" -> rate. Additive tokens win when both appear.
+# Separator-free tokens. Avoid greedy fragments like "count"/"order" that also
+# appear inside rate names ("dis*count*_pct", "re*order*_rate").
+_ADDITIVE_TOKENS = (
+    "revenue", "sales", "gmv", "turnover", "amount", "spend", "income", "payment",
+    "total", "profit", "cost", "quantity", "qty", "units", "volume",
+    "orders", "ordercount", "itemcount", "unitssold", "transactions",
+)
+_RATE_TOKENS = (
+    "price", "rate", "pct", "percent", "ratio", "avg", "average", "mean",
+    "aov", "margin", "discount", "unit",
+)
+
+
+def aggregation_for(value_col: str) -> str:
+    """Return "sum" for additive metrics, "mean" for rates/ratios."""
+    low = value_col.lower().replace("_", "").replace("-", "").replace(" ", "")
+    if any(t in low for t in _ADDITIVE_TOKENS):
+        return "sum"
+    if any(t in low for t in _RATE_TOKENS):
+        return "mean"
+    return "mean"
+
+
+def prepare_data(
+    df: pd.DataFrame, date_col: str, value_col: str, rule: str | None = None
+) -> pd.DataFrame:
+    """Collapse transaction rows into a clean per-period series.
+
+    Additive metrics (revenue, quantity, profit, …) are **summed** per period;
+    rates (unit price, discount %) are **averaged**.  When *rule* is given
+    (e.g. ``"W"``, ``"MS"``) the series is resampled to that granularity.
+    """
+    work = df[[date_col, value_col]].copy()
+    work["ds"] = pd.to_datetime(work[date_col], errors="coerce")
+    work["y"] = pd.to_numeric(work[value_col], errors="coerce")
+    work = work.dropna(subset=["ds", "y"]).sort_values("ds")
+    agg = aggregation_for(value_col)
+    if rule:
+        s = work.set_index("ds")["y"].resample(rule).agg(agg).dropna()
+        out = s.reset_index()
+    else:
+        out = work.groupby("ds", as_index=False)["y"].agg(agg)
+    return out[["ds", "y"]]
 
 
 def run_prophet(

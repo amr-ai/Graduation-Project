@@ -17,6 +17,8 @@ import streamlit as st
 from agents.churn.agent import generate_retention_plan
 from agents.churn.engine import run_churn_analysis
 from agents.churn.storage import save_churn_run
+from agents.constants import DEFAULT_CHURN_MODEL
+from agents.reporting.render import build_meta, render_report
 from tools.db_tools import is_pg_configured
 
 
@@ -100,6 +102,7 @@ st.caption(
     f"Snapshot {payload['snapshot_date']} · features measured as-of "
     f"{payload['cutoff_date']} · horizon {payload['horizon_days']} days · "
     f"{model.get('n_test', '—')} held-out customers."
+    + (" · probabilities calibrated" if model.get("calibrated") else "")
 )
 if model.get("note"):
     st.info(model["note"])
@@ -107,13 +110,19 @@ if model.get("note"):
 # ── Risk distribution ────────────────────────────────────────────────────────
 st.subheader("Risk overview")
 rd = payload["risk_distribution"]
-r1, r2, r3, r4 = st.columns(4)
+r1, r2, r3 = st.columns(3)
 r1.metric("High risk (≥70%)", rd["high"])
 r2.metric("Medium (40–70%)", rd["medium"])
 r3.metric("Low (<40%)", rd["low"])
+
 rar = payload.get("revenue_at_risk")
-r4.metric("Revenue at risk", f"{rar:,.0f}" if rar is not None else "—",
+err = payload.get("expected_revenue_at_risk")
+m1, m2 = st.columns(2)
+m1.metric("Revenue at risk", f"${rar:,.0f}" if rar is not None else "—",
           help="Historical spend of customers with ≥50% churn probability.")
+m2.metric("Expected revenue at risk", f"${err:,.0f}" if err is not None else "—",
+          help="Probability-weighted exposure: Σ (churn probability × historical spend) — "
+               "the risk-adjusted revenue you can expect to lose.")
 
 colA, colB = st.columns(2)
 with colA:
@@ -145,6 +154,18 @@ if at_risk:
     table_df = pd.DataFrame(at_risk)
     if "name" in table_df.columns and not table_df["name"].astype(bool).any():
         table_df = table_df.drop(columns=["name"])
+    # Lead with expected loss (value at risk) so the priority is obvious.
+    preferred = ["customer", "name", "expected_loss", "monetary", "churn_probability",
+                 "risk_tier", "recency_days", "frequency"]
+    ordered = [c for c in preferred if c in table_df.columns] + \
+              [c for c in table_df.columns if c not in preferred]
+    table_df = table_df[ordered]
+    if payload.get("at_risk_ranked_by") == "expected_value_at_risk":
+        st.caption(
+            "Ranked by **expected value at risk** = churn probability × historical spend — "
+            "so retention effort targets the customers whose loss would hurt most, not just "
+            "the highest-probability ones."
+        )
     st.dataframe(table_df, use_container_width=True, hide_index=True)
     st.download_button(
         "Download at-risk customers (CSV)",
@@ -178,4 +199,31 @@ if not has_key:
     st.caption("Add your Groq API key in the sidebar to generate the narrative plan.")
 
 if st.session_state.get("churn_report"):
-    st.markdown(st.session_state.churn_report)
+    rd = payload.get("risk_distribution", {})
+    kpi_cards: list[tuple[str, str]] = []
+    if payload.get("expected_revenue_at_risk") is not None:
+        kpi_cards.append(("Expected rev. at risk", f"${payload['expected_revenue_at_risk']:,.0f}"))
+    elif payload.get("revenue_at_risk") is not None:
+        kpi_cards.append(("Revenue at risk", f"${payload['revenue_at_risk']:,.0f}"))
+    if rd.get("high") is not None:
+        kpi_cards.append(("High risk", f"{rd['high']:,}"))
+    if rd.get("medium") is not None:
+        kpi_cards.append(("Medium risk", f"{rd['medium']:,}"))
+    if model.get("auc") is not None:
+        kpi_cards.append(("ROC-AUC", f"{model['auc']:.3f}"))
+
+    meta = build_meta(
+        "Retention Strategist",
+        model=st.session_state.get("churn_model", DEFAULT_CHURN_MODEL),
+        dataset=(table or "In-memory data"),
+        extra={"Horizon": f"{payload.get('horizon_days', '—')} days"},
+    )
+    render_report(
+        "Customer Retention Strategy",
+        st.session_state.churn_report,
+        meta=meta,
+        payloads=[payload],
+        kpis=kpi_cards,
+        subtitle="Win-back plan grounded in the churn model output",
+        filename_stem="retention_strategy",
+    )

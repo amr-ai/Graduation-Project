@@ -9,6 +9,7 @@ class ForecastState(TypedDict, total=False):
     horizon_days: int
     standard_horizons: list[int]
     model: str            # "Auto" (back-test selector) or a forced model name
+    granularity: str      # "native" | "daily" | "weekly" | "monthly"
     table_name: str
     business_context: str
 

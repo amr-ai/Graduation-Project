@@ -106,26 +106,27 @@ def compute_kpis(df: pd.DataFrame) -> dict:
         kpi["top_products"] = {}
         kpi["bottom_products"] = {}
 
-    # ── Customer segmentation: new vs returning ────────────────────────
-    if customer_col and time_col and order_col:
+    # ── Customer segmentation: one-time vs returning ───────────────────
+    # A "returning" customer has 2+ distinct orders (or 2+ transactions when no
+    # order id exists); "new"/one-time customers bought exactly once. These are a
+    # non-overlapping partition, so new + returning == total_customers and the
+    # percentages sum to 100 (the previous version double-counted first purchases,
+    # which made new_customer_pct always ~100%).
+    if customer_col:
         try:
-            df_time = df.copy()
-            df_time[time_col] = pd.to_datetime(df_time[time_col], errors="coerce")
-            first_purchase = df_time.groupby(customer_col)[time_col].min().to_dict()
-            df_time["is_first_purchase"] = df_time.apply(
-                lambda r: r[time_col] == first_purchase.get(r[customer_col]), axis=1
-            )
-            kpi["new_customers"] = int(df_time[df_time["is_first_purchase"]][customer_col].nunique())
-            kpi["returning_customers"] = int(
-                df_time[~df_time["is_first_purchase"]][customer_col].nunique()
-            )
-            if kpi["total_customers"] and kpi["total_customers"] > 0:
-                kpi["new_customer_pct"] = round(
-                    kpi["new_customers"] / kpi["total_customers"] * 100, 1
-                )
-                kpi["returning_customer_pct"] = round(
-                    kpi["returning_customers"] / kpi["total_customers"] * 100, 1
-                )
+            if order_col:
+                orders_per_cust = df.groupby(customer_col)[order_col].nunique()
+            else:
+                orders_per_cust = df.groupby(customer_col).size()
+            total_c = int(orders_per_cust.size)
+            returning = int((orders_per_cust >= 2).sum())
+            one_time = total_c - returning
+            kpi["returning_customers"] = returning
+            kpi["new_customers"] = one_time
+            kpi["one_time_customers"] = one_time
+            if total_c > 0:
+                kpi["returning_customer_pct"] = round(returning / total_c * 100, 1)
+                kpi["new_customer_pct"] = round(one_time / total_c * 100, 1)
         except Exception:
             kpi["new_customers"] = None
             kpi["returning_customers"] = None

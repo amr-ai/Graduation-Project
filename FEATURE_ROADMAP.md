@@ -101,6 +101,10 @@ chart(type, x, y), forecast(metric), …) exposed via function-calling.
 After generating an Insights/Marketing report, a second LLM pass checks every number against
 the deterministic payload (grounding/faithfulness check) and flags unsupported claims.
 - **Why it impresses**: a real *evaluation* component — examiners love measurable quality.
+- **✅ Shipped (v1, deterministic):** `agents/reporting/grounding.py` already extracts every
+  figure from each report and verifies it against the computed payload (no extra LLM call, no
+  cost), surfacing a coverage score + a badge listing any unmatched figures. Next step is the
+  optional *LLM* judge pass on top for qualitative critique.
 
 ### B4. Cross-session memory  ⭐⭐⭐ · 🔨🔨
 Remember a business's context/goals across sessions so reports get more tailored over time.
@@ -131,6 +135,9 @@ without touching agents.
 ### C5. Report export (PDF / PPTX) + scheduled email  ⭐⭐⭐⭐ · 🔨🔨
 Export the Insights/Marketing/Forecast/Churn reports and email a "weekly business review".
 - **Why it impresses**: turns a tool into a *product* a real owner would pay for.
+- **✅ Shipped (v1):** every report now exports to a styled, self-contained, print-ready HTML
+  document (Save-as-PDF) and to Markdown via `agents/reporting/export.py` — dependency-free.
+  Remaining: native PPTX and scheduled email delivery.
 
 ### C6. Saved projects / persistence + auth  ⭐⭐⭐ · 🔨🔨🔨
 Replace ephemeral `st.session_state` with saved, reloadable analyses; add multi-user auth.

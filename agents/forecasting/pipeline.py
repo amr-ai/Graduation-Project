@@ -57,6 +57,7 @@ class ForecastPipeline:
         run_id: str | None = None,
         store: bool = True,
         model_override: str = "Auto",
+        granularity: str = "native",
         **kwargs: Any,
     ) -> dict[str, Any]:
         if run_id is None:
@@ -88,6 +89,7 @@ class ForecastPipeline:
             "horizon_days": horizon_days,
             "standard_horizons": standard_horizons,
             "model": model_override or "Auto",
+            "granularity": granularity or "native",
             "table_name": table_name,
             "business_context": business_context,
             "current_target_index": 0,

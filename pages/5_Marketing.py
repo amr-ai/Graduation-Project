@@ -32,6 +32,7 @@ from agents.marketing.agent import (
 )
 from agents.marketing.engine import run_marketing_analytics
 from agents.marketing.storage import save_marketing_run
+from agents.reporting.render import build_meta, render_report
 from tools.db_tools import is_pg_configured
 from tools.sandbox import df_context
 
@@ -248,12 +249,35 @@ if payload:
 if report:
     st.divider()
     st.subheader("Marketing Strategy")
-    st.markdown(report)
-    st.download_button(
-        "Download Strategy (.md)",
-        data=report,
-        file_name="marketing_strategy.md",
-        mime="text/markdown",
+
+    mk = (payload or {}).get("marketing_kpis", {})
+    rfm = (payload or {}).get("rfm", {})
+    kpi_cards: list[tuple[str, str]] = []
+    if rfm.get("total_revenue"):
+        kpi_cards.append(("Revenue", f"${rfm['total_revenue']:,.0f}"))
+    if rfm.get("total_customers"):
+        kpi_cards.append(("Customers", f"{rfm['total_customers']:,}"))
+    if mk.get("aov"):
+        kpi_cards.append(("AOV", f"${mk['aov']:,.2f}"))
+    if mk.get("repeat_purchase_rate") is not None:
+        kpi_cards.append(("Repeat rate", f"{mk['repeat_purchase_rate']}%"))
+    if mk.get("churn_risk_pct") is not None:
+        kpi_cards.append(("Churn-risk", f"{mk['churn_risk_pct']}%"))
+
+    meta = build_meta(
+        "Marketing Strategist",
+        model=st.session_state.get("marketing_model", DEFAULT_MARKETING_MODEL),
+        dataset=(table or "In-memory data"),
+        extra={"Objective": objective},
+    )
+    render_report(
+        "Marketing Strategy",
+        report,
+        meta=meta,
+        payloads=[payload, forecast_results],
+        kpis=kpi_cards,
+        subtitle="RFM-driven growth strategy, grounded in your data",
+        filename_stem="marketing_strategy",
     )
 
 # ── HITL Step 3: Campaign plan ──────────────────────────────────────────────

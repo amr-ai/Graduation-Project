@@ -21,6 +21,7 @@ import plotly.graph_objects as go
 import streamlit as st
 from groq import Groq
 
+from agents.visualization.theme import style_figure
 from tools.db_tools import get_schema_info, load_df_from_pg
 from tools.sandbox import SAFE_BUILTINS, df_context, sanitize_fig
 
@@ -106,6 +107,13 @@ def generate_dashboard(
         "- Statistical spread      -> Box plot\n\n"
         "Assign each chart to fig1, fig2, fig3, fig4, fig5, fig6, fig7. "
         "Every figure MUST have a descriptive title that mentions the KPI being shown.\n\n"
+        "PROFESSIONAL QUALITY RULES (make it look like a senior BI report):\n"
+        "- Aggregate before plotting (groupby + sum/mean) — never plot raw rows as bars.\n"
+        "- Sort bars by value (descending) and cap categorical charts to the top 10-12.\n"
+        "- Use a clear, specific title AND, where useful, a short subtitle.\n"
+        "- Format money/large numbers on axes (e.g. fig.update_yaxes(tickprefix='$', tickformat=',.0f')).\n"
+        "- Prefer bar/line/area over pie; only use a donut for <=6 parts of a whole.\n"
+        "- No 3D charts, no rainbow colours — keep it clean and readable.\n\n"
         f"{focus_hint}"
         f"Data schema:\n{schema}\n\n"
         "IMPORTANT:\n"
@@ -181,13 +189,13 @@ def generate_dashboard(
         charts = []
         i = 1
         while g.get(f"fig{i}") is not None:
-            fig = sanitize_fig(g[f"fig{i}"])
+            fig = style_figure(sanitize_fig(g[f"fig{i}"]))
             title = fig.layout.title.text if fig.layout.title else f"Chart {i}"
             charts.append({"query": title, "fig": fig, "code": code})
             i += 1
 
         if not charts and g.get("fig"):
-            fig = sanitize_fig(g["fig"])
+            fig = style_figure(sanitize_fig(g["fig"]))
             title = fig.layout.title.text if fig.layout.title else "Chart"
             charts.append({"query": title, "fig": fig, "code": code})
 

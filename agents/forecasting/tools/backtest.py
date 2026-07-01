@@ -31,7 +31,11 @@ def _splits(n: int, h: int, folds: int, min_train: int) -> list[tuple[int, int]]
 
 
 def _min_train(n: int, h: int, freq: str) -> int:
-    return max(2 * season_length(freq, n), 8, h)
+    # Enough history to fit one seasonal cycle, but never so large that no fold
+    # can form — capping at n//2 lets typical weekly/monthly series (season 52/12)
+    # still be back-tested instead of silently falling back to Naive.
+    m = season_length(freq, n)
+    return max(min(2 * m, n // 2), 8, h)
 
 
 def _resolve_folds(n: int, h: int, freq: str, folds: int) -> tuple[int, int]:

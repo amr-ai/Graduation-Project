@@ -99,7 +99,9 @@ def interpret_node(state: ForecastState) -> dict:
             "opportunities": record.get("opportunities", []),
             "recommended_actions": record.get("recommended_actions", []),
             "confidence_statement": (
-                f"Confidence {record.get('confidence_score', 0):.0%} based on backtest error."
+                f"Confidence {record['confidence_score']:.0%} based on out-of-sample back-test error."
+                if record.get("confidence_score") is not None
+                else "Not back-tested (insufficient history for cross-validation)."
             ),
         })
 

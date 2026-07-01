@@ -24,6 +24,7 @@ from agents.constants import DEFAULT_INSIGHTS_MODEL
 from agents.insights.agent import generate_insights
 from agents.insights.template_selector import select_template, describe_template
 from agents.analytics.engine import run_analytics
+from agents.reporting.render import build_meta, render_report
 from tools.sandbox import df_context, run_analysis
 
 
@@ -224,22 +225,36 @@ if analytics_payload:
 insights_report = st.session_state.get("insights_report", "")
 if insights_report:
     st.divider()
+    st.subheader("Business Report")
 
-    template_label = st.session_state.get("selected_template_label", "")
-    if template_label:
-        st.caption(f"Report style: {template_label}")
+    kpi = (analytics_payload or {}).get("kpi", {})
+    rows = (analytics_payload or {}).get("metadata", {}).get("row_count")
+    kpi_cards: list[tuple[str, str]] = []
+    if kpi.get("revenue"):
+        kpi_cards.append(("Revenue", f"${kpi['revenue']:,.0f}"))
+    if kpi.get("orders"):
+        kpi_cards.append(("Orders", f"{kpi['orders']:,}"))
+    if kpi.get("aov"):
+        kpi_cards.append(("AOV", f"${kpi['aov']:,.2f}"))
+    if kpi.get("total_customers"):
+        kpi_cards.append(("Customers", f"{kpi['total_customers']:,}"))
 
-    st.markdown(insights_report)
-
-    col_down, _ = st.columns([1, 4])
-    with col_down:
-        st.download_button(
-            "Download Report (.md)",
-            data=insights_report,
-            file_name="business_insights_report.md",
-            mime="text/markdown",
-            use_container_width=True,
-        )
+    meta = build_meta(
+        "Business Insights",
+        model=st.session_state.get("insights_model", DEFAULT_INSIGHTS_MODEL),
+        dataset=(table or "In-memory data"),
+        rows=rows,
+        extra={"Style": st.session_state.get("selected_template_label", "")},
+    )
+    render_report(
+        "Business Insights Report",
+        insights_report,
+        meta=meta,
+        payloads=[analytics_payload],
+        kpis=kpi_cards,
+        subtitle="Automated business analysis, grounded in your data",
+        filename_stem="business_insights_report",
+    )
 
 # ── HITL Step 3: Follow-up chat to drill into sections ─────────────────
 

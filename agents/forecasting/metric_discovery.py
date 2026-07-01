@@ -8,11 +8,15 @@ from agents.forecasting.forecast_models import ForecastState
 from agents.forecasting.validation import _detect_numeric_metrics
 
 
+# Tokens are matched against the column name with separators stripped
+# (``total_price`` -> ``totalprice``), so keep tokens separator-free.
 _PRIORITY_TOKENS = (
-    "revenue", "sales", "gmv", "totalspent", "total_spent", "amount",
-    "orders", "ordercount", "order_count", "transactions",
-    "customers", "customer_count", "uniquecustomers",
-    "quantity", "units", "aov", "averageordervalue", "avg_order",
+    "revenue", "sales", "gmv", "totalsales", "netrevenue", "turnover",
+    "totalprice", "linetotal", "grandtotal", "subtotal", "ordervalue",
+    "totalspent", "amount",
+    "orders", "ordercount", "transactions",
+    "customers", "customercount", "uniquecustomers",
+    "quantity", "units", "aov", "averageordervalue",
     "profit", "margin",
 )
 

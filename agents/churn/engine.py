@@ -106,7 +106,23 @@ def run_churn_analysis(
     if name_col:
         name_map = df.dropna(subset=[name_col]).groupby(cust)[name_col].first().to_dict()
 
-    ranked = scored.sort_values("churn_probability", ascending=False).head(top_n)
+    # Rank by *expected value at risk* (churn probability × historical spend) when
+    # spend is available — a senior analyst targets high-value at-risk customers,
+    # not just the highest-probability ones (a certain-to-churn $10 buyer matters
+    # far less than a likely-to-churn $2,000 one). Falls back to probability.
+    scored_ranked = scored.copy()
+    if has_money:
+        scored_ranked["_expected_loss"] = (
+            scored_ranked["churn_probability"] * scored_ranked["monetary"].astype(float)
+        )
+        ranked = scored_ranked.sort_values(
+            ["_expected_loss", "churn_probability"], ascending=False
+        ).head(top_n)
+        ranked_by = "expected_value_at_risk"
+    else:
+        ranked = scored_ranked.sort_values("churn_probability", ascending=False).head(top_n)
+        ranked_by = "churn_probability"
+
     at_risk_customers = []
     for customer_id, row in ranked.iterrows():
         prob = float(row["churn_probability"])
@@ -120,6 +136,7 @@ def run_churn_analysis(
         }
         if has_money:
             entry["monetary"] = round(float(row.get("monetary", 0.0)), 2)
+            entry["expected_loss"] = round(prob * float(row.get("monetary", 0.0)), 2)
         at_risk_customers.append(entry)
 
     return {
@@ -135,6 +152,7 @@ def run_churn_analysis(
         "revenue_at_risk": revenue_at_risk,
         "expected_revenue_at_risk": expected_revenue_at_risk,
         "at_risk_customers": at_risk_customers,
+        "at_risk_ranked_by": ranked_by,
         "metadata": {
             "customer_column": cust,
             "time_column": time_col,

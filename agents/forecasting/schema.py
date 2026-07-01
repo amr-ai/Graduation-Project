@@ -20,8 +20,9 @@ class ForecastOutput(BaseModel):
     current_value: float
     forecasted_value: float
     change_percent: float
-    confidence_score: float
+    confidence_score: Optional[float] = None
     forecast_horizon: str
+    granularity: str = "daily"
     selected_model: str
     model_selection_reason: str = ""
     evaluation: ForecastEvaluation = Field(default_factory=ForecastEvaluation)

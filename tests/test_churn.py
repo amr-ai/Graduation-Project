@@ -107,9 +107,11 @@ def test_run_churn_analysis_trains_model() -> None:
     # Lapsed customers should dominate the top of the at-risk ranking.
     top10 = [c["customer"] for c in payload["at_risk_customers"][:10]]
     assert sum(1 for c in top10 if c.startswith("L")) >= 7
-    # Probabilities are sorted descending.
-    probs = [c["churn_probability"] for c in payload["at_risk_customers"]]
-    assert probs == sorted(probs, reverse=True)
+    # The list is now ranked by expected value at risk (prob × spend), descending.
+    assert payload["at_risk_ranked_by"] == "expected_value_at_risk"
+    losses = [c["expected_loss"] for c in payload["at_risk_customers"]]
+    assert losses == sorted(losses, reverse=True)
+    assert all("expected_loss" in c and "monetary" in c for c in payload["at_risk_customers"])
 
 
 def test_run_churn_analysis_requires_customer_and_date() -> None:

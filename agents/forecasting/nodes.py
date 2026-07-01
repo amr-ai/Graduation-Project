@@ -32,14 +32,42 @@ def _business_impact(change_pct: float) -> str:
     return "low"
 
 
-def _confidence_from_metrics(metrics: dict) -> float:
-    mape = metrics.get("mape")
-    if mape is not None:
-        return round(max(0.1, min(0.95, 1.0 - mape / 100)), 2)
-    rmse = metrics.get("rmse", 0)
-    if rmse:
-        return round(max(0.1, min(0.95, 1.0 - rmse / 1000)), 2)
-    return 0.7
+# granularity -> (pandas resample rule, freq label, days per period)
+_GRANULARITY = {
+    "daily": ("D", "daily", 1),
+    "weekly": ("W", "weekly", 7),
+    "monthly": ("MS", "monthly", 30),
+}
+
+
+def _resolve_granularity(granularity: str, detected_freq: str) -> tuple[str | None, str, int]:
+    g = (granularity or "native").lower()
+    if g in _GRANULARITY:
+        return _GRANULARITY[g]
+    # "native"/"auto" -> forecast at the detected frequency, no resampling.
+    fl = detected_freq if detected_freq in ("daily", "weekly", "monthly") else "daily"
+    return (None, fl, {"daily": 1, "weekly": 7, "monthly": 30}[fl])
+
+
+def _confidence(mape: float | None, skill: float | None, folds: int | None) -> float | None:
+    """Principled, honest back-test reliability in [0.05, 0.95].
+
+    Built from the out-of-sample error (a saturating transform of MAPE so it
+    never goes negative), rewarded for beating the naive baseline and penalised
+    for thin back-tests. ``None`` when the model could not be back-tested — the
+    UI then says "not back-tested" instead of inventing a number.
+    """
+    if mape is None:
+        return None
+    acc = 1.0 / (1.0 + max(float(mape), 0.0) / 100.0)
+    if skill is None:
+        skill_adj = 0.85
+    else:
+        skill_adj = float(np.clip(0.7 + 0.3 * np.clip(skill, 0.0, 1.0), 0.7, 1.0))
+    conf = acc * skill_adj
+    if folds is not None and folds < 3:
+        conf *= 0.9
+    return round(float(np.clip(conf, 0.05, 0.95)), 2)
 
 
 def _build_chart(
@@ -90,32 +118,43 @@ def _forecast_one_target(
     horizons: list[int],
     run_id: str,
     model: str = "Auto",
+    granularity: str = "native",
 ) -> dict[str, Any]:
-    max_horizon = max(horizons)
-    prep = prepare_data(df, date_col, target)
+    rule, freq_label, period_days = _resolve_granularity(granularity, freq)
+
+    prep = prepare_data(df, date_col, target, rule)
     y = prep["y"].values.astype(float)
     dates = prep["ds"].values
 
-    series = SeriesData(y=y, dates=dates, frequency=freq)
-    result = ForecastEngine.run(model, series, max_horizon)
+    # Horizons arrive in days; convert to the number of periods at this granularity.
+    def _periods(days: int) -> int:
+        return max(1, int(round(days / period_days)))
+
+    horizon_p = _periods(horizon)
+    horizons_p = {h: _periods(h) for h in horizons}
+    max_h = max([horizon_p, *horizons_p.values()])
+
+    series = SeriesData(y=y, dates=dates, frequency=freq_label)
+    result = ForecastEngine.run(model, series, max_h)
 
     fv = result["forecast"]
     horizon_values: dict[str, float] = {}
-    for h in horizons:
-        if len(fv) >= h:
-            horizon_values[f"{h}_days"] = float(np.mean(fv[:h]))
+    for h, hp in horizons_p.items():
+        if len(fv):
+            horizon_values[f"{h}_days"] = float(np.mean(fv[:min(hp, len(fv))]))
 
     current_val = float(y[-1]) if len(y) else 0.0
     forecast_val = horizon_values.get(f"{horizon}_days", float(fv[-1]) if len(fv) else current_val)
     change_pct = round((forecast_val - current_val) / abs(current_val) * 100, 2) if current_val else 0.0
 
     metrics = result.get("metrics", {})
-    confidence = _confidence_from_metrics(metrics)
-    trend = "growing" if change_pct > 5 else "declining" if change_pct < -5 else "stable"
-
     selected_model = result.get("selected_model", "Prophet")
     cv_results = result.get("cv_results", [])
     skill_score = result.get("skill_score")
+    sel = next((r for r in cv_results if r.get("model") == selected_model), None)
+    folds = sel.get("folds") if sel else None
+    confidence = _confidence(metrics.get("mape"), skill_score, folds)
+    trend = "growing" if change_pct > 5 else "declining" if change_pct < -5 else "stable"
 
     output = ForecastOutput(
         metric=target,
@@ -124,6 +163,7 @@ def _forecast_one_target(
         change_percent=change_pct,
         confidence_score=confidence,
         forecast_horizon=f"{horizon}_days",
+        granularity=freq_label,
         selected_model=selected_model,
         model_selection_reason=result.get("model_selection_reason", ""),
         evaluation=ForecastEvaluation(
@@ -138,10 +178,10 @@ def _forecast_one_target(
         skill_score=skill_score,
     )
 
-    forecast_dates = result["dates"][:horizon]
-    forecast_values = fv[:horizon]
-    lower = result["lower"][:horizon]
-    upper = result["upper"][:horizon]
+    forecast_dates = result["dates"][:horizon_p]
+    forecast_values = fv[:horizon_p]
+    lower = result["lower"][:horizon_p]
+    upper = result["upper"][:horizon_p]
 
     fig = _build_chart(dates, y, forecast_dates, forecast_values, lower, upper, target, selected_model)
 
@@ -257,6 +297,7 @@ def forecast_node(state: ForecastState) -> dict:
     horizons = sorted({h for h in horizons if h > 0} | {horizon})
     run_id = state.get("run_id", "")
     model = state.get("model", "Auto")
+    granularity = state.get("granularity", "native")
 
     all_outputs: list[dict] = []
     all_figures: list[go.Figure] = []
@@ -267,7 +308,7 @@ def forecast_node(state: ForecastState) -> dict:
 
     with ThreadPoolExecutor(max_workers=min(len(targets), 4)) as pool:
         futures = {
-            pool.submit(_forecast_one_target, t, df, date_col, freq, horizon, horizons, run_id, model): t
+            pool.submit(_forecast_one_target, t, df, date_col, freq, horizon, horizons, run_id, model, granularity): t
             for t in targets
         }
         for future in as_completed(futures):

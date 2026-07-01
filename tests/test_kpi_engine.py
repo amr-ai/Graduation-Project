@@ -50,3 +50,21 @@ def test_compute_kpis_empty_df() -> None:
     df = pd.DataFrame({"revenue": []})
     kpis = compute_kpis(df)
     assert isinstance(kpis, dict)
+
+
+def test_new_and_returning_are_a_partition() -> None:
+    # C1 has 2 orders (returning), C2 & C3 have 1 order each (one-time).
+    df = pd.DataFrame({
+        "order_id": ["O1", "O2", "O3", "O4"],
+        "customer_id": ["C1", "C1", "C2", "C3"],
+        "order_date": pd.date_range("2024-01-01", periods=4),
+        "revenue": [100, 200, 150, 300],
+    })
+    kpis = compute_kpis(df)
+    assert kpis["total_customers"] == 3
+    assert kpis["returning_customers"] == 1        # C1
+    assert kpis["new_customers"] == 2              # C2, C3 (one-time)
+    # Non-overlapping partition: the two must add up to the total…
+    assert kpis["new_customers"] + kpis["returning_customers"] == kpis["total_customers"]
+    # …and the percentages must sum to 100 (the old bug made new_pct ~100 alone).
+    assert round(kpis["new_customer_pct"] + kpis["returning_customer_pct"]) == 100
